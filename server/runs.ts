@@ -10,7 +10,9 @@ export interface Run {
   runId: string;
   project: string;
   model: string;
-  permission: 'edit' | 'auto';
+  permission: 'edit' | 'auto' | 'readonly';
+  /** team runs bring their own instructions (no generic report footer) */
+  raw?: boolean;
   task: string;
   status: 'running' | 'done' | 'failed' | 'stopped';
   startedAt: number;
@@ -19,10 +21,12 @@ export interface Run {
   result?: string;
   cost?: number;
   child?: ChildProcess;
+  /** called once when the run ends (done, failed or stopped) */
+  onDone?: (ok: boolean, text: string) => void;
 }
 
 const runs = new Map<string, Run>();
-const MAX_RUNS = 3;
+const MAX_RUNS = 6;
 
 const MODEL_IDS: Record<string, string | undefined> = {
   opus: 'claude-opus-5-5',
@@ -69,13 +73,26 @@ function killTree(child: ChildProcess) {
   else child.kill('SIGTERM');
 }
 
+/**
+ * Environment for agent runs: the user's environment minus Claudeville's own server settings.
+ * (An inherited PORT=5199 once made a QA agent start the team's test server on the office's port.)
+ */
+function runEnv(runId: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, AGENT_OFFICE_RUN: runId, AGENT_OFFICE_SKIP: '' };
+  for (const k of Object.keys(env)) if (/^(PORT|HOST|VITE_|npm_)/i.test(k) || k === 'NODE_ENV') delete env[k];
+  return env;
+}
+
 function startRun(r: Run, broadcast: (raw: Record<string, unknown>) => void) {
-  const args = ['-p', '--output-format', 'json', '--permission-mode', r.permission === 'auto' ? 'auto' : 'acceptEdits'];
+  const args = ['-p', '--output-format', 'json'];
+  // read-only runs (team planning and review) can look at the code but never change it
+  if (r.permission === 'readonly') args.push('--tools', 'Read', 'Grep', 'Glob');
+  else args.push('--permission-mode', r.permission === 'auto' ? 'auto' : 'acceptEdits');
   const id = MODEL_IDS[r.model];
   if (id) args.push('--model', id);
   const child = spawn('claude', args, {
     cwd: r.project,
-    env: { ...process.env, AGENT_OFFICE_RUN: r.runId, AGENT_OFFICE_SKIP: '' },
+    env: runEnv(r.runId),
     shell: process.platform === 'win32',
     windowsHide: true,
   });
@@ -91,6 +108,7 @@ function startRun(r: Run, broadcast: (raw: Record<string, unknown>) => void) {
     r.result = text;
     r.child = undefined;
     broadcast({ hook_event_name: 'RunDone', session_id: r.session ?? 'run:' + r.runId, office_run: r.runId, ok, summary: text, cwd: r.project });
+    r.onDone?.(ok, text);
   };
   child.on('error', (e) => finish(false, `Could not start the claude CLI: ${e.message}`));
   child.on('close', () => {
@@ -108,7 +126,7 @@ function startRun(r: Run, broadcast: (raw: Record<string, unknown>) => void) {
   });
   // the task itself, plus a nudge to end with a short report for the manager
   child.stdin?.end(
-    `${r.task}\n\nWhen you are done, end with a short report (2-4 sentences) for your manager: what you changed and anything they should check.`,
+    r.raw ? r.task : `${r.task}\n\nWhen you are done, end with a short report (2-4 sentences) for your manager: what you changed and anything they should check.`,
   );
 }
 
@@ -147,6 +165,7 @@ export async function handleRuns(
     r.result = 'Stopped by the manager.';
     if (r.child) killTree(r.child);
     broadcast({ hook_event_name: 'RunDone', session_id: r.session ?? 'run:' + r.runId, office_run: r.runId, ok: false, summary: 'Stopped by the manager.' });
+    r.onDone?.(false, 'Stopped by the manager.');
     return send(200, { ok: true });
   }
   if (url.startsWith('/api/run')) {
@@ -161,8 +180,9 @@ export async function handleRuns(
       runId,
       project,
       model: String(q.model ?? 'default') in MODEL_IDS ? String(q.model ?? 'default') : 'default',
-      permission: q.permission === 'auto' ? 'auto' : 'edit',
-      task: task.slice(0, 4000),
+      permission: q.permission === 'auto' ? 'auto' : q.permission === 'readonly' ? 'readonly' : 'edit',
+      raw: !!q.raw,
+      task: task.slice(0, 24000),
       status: 'running',
       startedAt: Date.now(),
     };
@@ -171,4 +191,38 @@ export async function handleRuns(
     return send(200, { ok: true, run: publicRun(r) });
   }
   send(404, { ok: false, error: 'unknown' });
+}
+
+/** Start a run from server code (team mode) and get a promise for its result. */
+export function launchRun(
+  o: { runId: string; project: string; model: string; permission: Run['permission']; task: string; raw?: boolean },
+  broadcast: (raw: Record<string, unknown>) => void,
+): Promise<{ ok: boolean; text: string }> {
+  return new Promise((resolve) => {
+    const r: Run = {
+      runId: o.runId,
+      project: o.project,
+      model: o.model in MODEL_IDS ? o.model : 'default',
+      permission: o.permission,
+      raw: o.raw,
+      task: o.task,
+      status: 'running',
+      startedAt: Date.now(),
+      onDone: (ok, text) => resolve({ ok, text }),
+    };
+    runs.set(r.runId, r);
+    startRun(r, broadcast);
+  });
+}
+
+/** Stop a run started by anyone. */
+export function stopRun(runId: string, broadcast: (raw: Record<string, unknown>) => void) {
+  const r = runs.get(runId);
+  if (!r || r.status !== 'running') return;
+  r.status = 'stopped';
+  r.endedAt = Date.now();
+  r.result = 'Stopped by the manager.';
+  if (r.child) killTree(r.child);
+  broadcast({ hook_event_name: 'RunDone', session_id: r.session ?? 'run:' + r.runId, office_run: r.runId, ok: false, summary: 'Stopped by the manager.' });
+  r.onDone?.(false, 'Stopped by the manager.');
 }

@@ -21,6 +21,7 @@ import { AvatarPicker, savedAvatar } from './avatar';
 import { Dispatch } from './dispatch';
 import { APP_NAME, APP_TAGLINE } from './brand';
 import { AnswerCard } from './answer';
+import { Team } from './team';
 
 document.title = APP_NAME;
 document.getElementById('appname')!.textContent = APP_NAME;
@@ -139,6 +140,14 @@ const social = new Social(office, player, tease);
 const picker = new AvatarPicker();
 const dispatch = new Dispatch(office, director, world, sound);
 const answerCard = new AnswerCard();
+const team = new Team(office, director, world, sound);
+document.getElementById('teamBtn')!.onclick = () => team.toggle();
+team.onOpenChange = (open) => {
+  if (open) {
+    chat.close();
+    dispatch.close();
+  }
+};
 answerCard.onAnswered = (a) => {
   a.react({ name: 'thanks', dur: 1.2, hold: false, pose: () => 'happy' });
 };
@@ -178,7 +187,10 @@ document.addEventListener('visibilitychange', presence);
 const hintEl = document.getElementById('hint')!;
 document.getElementById('dispatchBtn')!.onclick = () => dispatch.toggle();
 dispatch.onOpenChange = (open) => {
-  if (open) chat.close();
+  if (open) {
+    chat.close();
+    team?.close();
+  }
 };
 player.onStandUp = () => dispatch.close();
 const MANAGER_STAND = world.manager.seat.clone().add(new THREE.Vector3(0.8, 0, 0));
@@ -199,7 +211,10 @@ hud.onTalk = (id) => {
   if (a) chat.open(a);
 };
 chat.onOpenChange = (open) => {
-  if (open) dispatch.close();
+  if (open) {
+    dispatch.close();
+    team?.close();
+  }
   // in the overview, glide over to the agent you are talking to
   if (open && chat.agent && player.mode === 'orbit') hud.follow(chat.agent.id);
 };
@@ -278,6 +293,10 @@ addEventListener('keydown', (e) => {
     answerCard.close();
     return;
   }
+  if (k === 'escape' && team.isOpen) {
+    team.close();
+    return;
+  }
   if (k === 'escape' && dispatch.isOpen) {
     dispatch.close();
     return;
@@ -326,6 +345,7 @@ function ingest(e: OfficeEvent, isDemo = false) {
   hud.log(e, isDemo);
   chat?.track(e, director.officeIdFor(e));
   dispatch?.onEvent(e);
+  team?.onEvent(e);
 }
 
 // ------------------------------------------------------------------ live connection
@@ -335,6 +355,7 @@ function connect() {
   const es = new EventSource('/api/stream');
   es.addEventListener('replay', (m) => {
     const events = JSON.parse((m as MessageEvent).data) as OfficeEvent[];
+    team.restore(events); // members still working keep their names and looks
     director.replay(events);
     // questions older than the replay window are still waiting: put those raised hands back too
     fetch('/api/asks', { headers: { 'x-agent-office': '1' } })
@@ -542,4 +563,4 @@ function frame(dt: number) {
 }
 
 // handy for debugging from the console
-Object.assign(window, { office, director, world, ingest, camera, controls, demo, tease, emotes, player, sound, social, chat, dispatch });
+Object.assign(window, { office, director, world, ingest, camera, controls, demo, tease, emotes, player, sound, social, chat, dispatch, team });

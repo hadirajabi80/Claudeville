@@ -70,7 +70,11 @@ export class Office implements Stage {
     if (this.agents.has(id)) return;
     // every agent gets an Iranian first name; the character's look follows the name
     const taken = new Set([...this.agents.values()].map((x) => x.name));
-    const nm = o.role === 'player' ? { name: o.name, gender: 'm' as const } : pickName(o.role === 'lead' ? o.session : id + o.session, taken);
+    const nm = o.fixedName
+      ? { name: o.fixedName, gender: o.gender ?? ('m' as const) }
+      : o.role === 'player'
+        ? { name: o.name, gender: 'm' as const }
+        : pickName(o.role === 'lead' ? o.session : id + o.session, taken);
     const a = new Agent(id, o.role, variantFor(o.role, id), o.session, nm.name, o.subtitle, nm.gender);
     trimShadowCasters(a.rig.root);
     this.scene.add(a.rig.root);
@@ -235,6 +239,26 @@ export class Office implements Stage {
     this.onChange?.();
   }
 
+  /** Bring a team member into the office (if not here yet). Returns its character id. */
+  callMember(memberId: string, o: { name: string; gender: 'm' | 'f'; subtitle: string; model: string }): string {
+    const id = 'team:' + memberId;
+    let a = this.agents.get(id);
+    if (!a) {
+      this.spawn(id, { role: 'lead', name: o.name, subtitle: o.subtitle, session: id, instant: false, fixedName: o.name, gender: o.gender });
+      a = this.agents.get(id)!;
+    }
+    a.subtitle = o.subtitle;
+    if (o.model) a.model = o.model;
+    this.onChange?.();
+    return id;
+  }
+
+  /** Team members who are no longer on the team go home. */
+  dismissMember(memberId: string) {
+    const id = 'team:' + memberId;
+    if (this.agents.has(id)) this.leave(id, false, false);
+  }
+
   /** Call a new agent to the manager desk. Resolves with its id once it stands in front of you. */
   summon(runId: string, project: string, model: string): Promise<string> {
     const id = 'run:' + runId;
@@ -275,7 +299,8 @@ export class Office implements Stage {
             a.say((ok ? 'Done! ' : 'Hmm… ') + (short.length > 90 ? short.slice(0, 89) + '…' : short), 'say', 6.5);
             if (!ok) this.emote(a, 'sweat', 2);
           },
-          onDone: () => this.leave(id, false, false),
+          // team members stay in the office between tasks; one-off helpers go home
+          onDone: () => (id.startsWith('team:') ? this.moveTo(a, this.pickLounge(a), [{ kind: 'rest' }], [], true) : this.leave(id, false, false)),
         },
       ],
       pre,

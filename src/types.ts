@@ -58,6 +58,9 @@ export interface SpawnOptions {
   subtitle: string;
   session: string;
   instant: boolean;
+  /** team members keep the name and look you gave them */
+  fixedName?: string;
+  gender?: 'm' | 'f';
 }
 
 /** What the 3D office must be able to do. The director drives it from hook events. */

@@ -96,6 +96,18 @@ Walk up to the big desk at the front and press **E** to sit in the boss chair, o
 
 Models your API key cannot use are crossed out automatically after the first refusal; **Default** always uses the model your Claude Code is set to.
 
+## Team mode
+
+Press **👥 Team** to build a team. For each member pick a role (Team Lead, Product Owner, UI/UX Designer, Frontend, Backend, DevOps, QA, Security, Data, Technical Writer), a seniority level (Junior to Principal), skills, a model and what they may do (read only, edit files, or edit files and run commands). **Use starter team** fills in a lead, a product owner, frontend and backend engineers, DevOps and QA.
+
+Write a request for the team, pick the project folder and press **🚀 Send to team**:
+
+1. The Team Lead reads the project and plans the work, giving each member a task that matches exactly their role (no coding for the lead or the product owner).
+2. Members work in phases: everyone in a phase works at the same time, each as an expert in their own field, and stays out of the others' areas. They hand off notes in `TEAM_NOTES.md`.
+3. The Team Lead reviews the result against the request and writes the final summary.
+
+Every member is a character with the name you gave them: they walk to a desk when their task starts, report at the manager desk when it is done and wait in the lounge for the next job. The work is coordinated by the server, so it keeps going if you reload or close the page; **■ Stop** stops the whole team.
+
 ## Your character and the team
 
 The first time you step in you pick a male or female character and a name. Change it any time with **👤**. Every agent gets an Iranian first name with its model next to it, for example *Kourosh · Opus 5.5*, read from its session transcript.

@@ -5,6 +5,7 @@ import type { ServerResponse, IncomingMessage } from 'node:http';
 import path from 'node:path';
 import { handleChat, type SessionInfo } from './chat';
 import { handleRuns } from './runs';
+import { handleTeam } from './team';
 import { handleAsk, handleAnswer, markVisible, pendingAsks, type AskPayload } from './asks';
 import fs from 'node:fs';
 
@@ -25,6 +26,9 @@ export interface OfficeEvent {
   ok?: boolean;
   /** questions / permission prompts waiting for an answer in the office */
   ask?: AskPayload | { id: string; how: string };
+  /** team mode: full team state (TeamUpdate) or the member doing a run (TeamTask) */
+  team?: unknown;
+  member?: unknown;
   tool?: string;
   toolUseId?: string;
   detail?: string;
@@ -166,6 +170,8 @@ export function normalize(raw: Record<string, any>): OfficeEvent {
     runId: raw.office_run ? String(raw.office_run) : undefined,
     ok: typeof raw.ok === 'boolean' ? raw.ok : undefined,
     ask: raw.ask,
+    team: raw.team,
+    member: raw.member,
     detail,
   };
 }
@@ -207,6 +213,11 @@ const middleware: Connect.NextHandleFunction = async (req, res, next) => {
   if (url.startsWith('/api/projects') || url.startsWith('/api/models') || url.startsWith('/api/runs') || url.startsWith('/api/run')) {
     const body = req.method === 'POST' ? await readBody(req) : '';
     await handleRuns(req, res, body, () => [...sessions.values()].map((s) => s.cwd ?? ''), (raw) => broadcast({ ...normalize(raw), ...modelFor(raw) }));
+    return;
+  }
+  if (url.startsWith('/api/team')) {
+    const body = req.method === 'POST' ? await readBody(req) : '';
+    await handleTeam(req, res, body, (raw) => broadcast({ ...normalize(raw), ...modelFor(raw) }));
     return;
   }
   if (url.startsWith('/api/asks') && req.method === 'GET') {
