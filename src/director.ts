@@ -91,6 +91,15 @@ export class Director {
         if (sub) this.finishSub(sub, true);
         break;
       }
+      case 'Ask': {
+        if (!e.ask?.summary) break;
+        const id = this.targetFor(e, now);
+        this.stage.ask(id, e.ask); // also on replay: AskDone (if any) clears it again
+        break;
+      }
+      case 'AskDone':
+        if (e.ask?.id) this.stage.clearAsk(e.ask.id, e.ask.how ?? '');
+        break;
       case 'RunDone': {
         const charId = e.runId ? this.runChars.get(e.runId) : undefined;
         if (!charId) break;

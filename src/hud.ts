@@ -38,6 +38,7 @@ export class Hud {
   private countsEl = document.getElementById('counts')!;
   onFollow?: (id: string | null) => void;
   onTalk?: (id: string) => void;
+  onAnswer?: (id: string) => void;
   talkableId: string | null = null;
   followId: string | null = null;
 
@@ -76,6 +77,12 @@ export class Hud {
     this.sessionsEl.querySelectorAll<HTMLDivElement>('[data-id]').forEach((el) => {
       el.onclick = () => this.follow(el.dataset.id === this.followId ? null : el.dataset.id!);
     });
+    this.sessionsEl.querySelectorAll<HTMLButtonElement>('[data-ans]').forEach((b) => {
+      b.onclick = (e) => {
+        e.stopPropagation();
+        this.onAnswer?.(b.dataset.ans!);
+      };
+    });
     this.sessionsEl.querySelectorAll<HTMLButtonElement>('[data-talk]').forEach((b) => {
       b.onclick = (e) => {
         e.stopPropagation();
@@ -85,12 +92,12 @@ export class Hud {
   }
 
   private rowHtml(a: Agent, sub: boolean) {
-    const state = a.notifying ? 'waiting' : a.busyWorking || (a.state === 'sit' && a.spot?.kind === 'desk') ? 'working' : a.walking ? 'walking' : a.state === 'celebrate' ? 'done!' : 'break';
+    const state = a.pendingAsk ? 'asking' : a.notifying ? 'waiting' : a.busyWorking || (a.state === 'sit' && a.spot?.kind === 'desk') ? 'working' : a.walking ? 'walking' : a.state === 'celebrate' ? 'done!' : 'break';
     const doing = a.activity && a.busyWorking ? esc(verb(a.activity)) : '';
     return `<div class="sess ${sub ? 'sub' : ''} ${this.followId === a.id ? 'followed' : ''}" data-id="${a.id}">
       <i style="background:${hex(a.rig.accent)}"></i>
       <div class="who"><b>${sub ? '↳ ' : ''}${esc(a.name)}</b>${a.model ? ` <span class="mdl">${esc(a.model)}</span>` : ''} <small>${esc(a.subtitle)}</small><div class="doing">${doing}</div></div>
-      <span class="chip ${state}">${state}</span><button class="talk" data-talk="${a.id}" title="Chat with ${esc(a.name)}">💬</button></div>`;
+      <span class="chip ${state}">${state}</span>${a.pendingAsk ? `<button class="talk ans" data-ans="${a.id}" title="Answer ${esc(a.name)}’s question">❓</button>` : ''}<button class="talk" data-talk="${a.id}" title="Chat with ${esc(a.name)}">💬</button></div>`;
   }
 
   follow(id: string | null) {
@@ -129,6 +136,7 @@ export class Hud {
       t.root.classList.toggle('player', a.role === 'player');
       t.root.classList.toggle('followed', this.followId === a.id);
       t.root.classList.toggle('talkable', this.talkableId === a.id);
+      t.root.classList.toggle('asking', !!a.pendingAsk);
       const b = a.bubble && a.bubble.until > now ? a.bubble : null;
       const key = b ? b.tone + b.text : '';
       if (key !== t.lastBubble) {
@@ -162,7 +170,14 @@ export class Hud {
       e.stopPropagation();
       this.onTalk?.(a.id);
     };
-    root.append(bubble, name, talk);
+    const ask = document.createElement('button');
+    ask.className = 'askpill';
+    ask.innerHTML = '❓ Needs your answer · <kbd>E</kbd>';
+    ask.onclick = (e) => {
+      e.stopPropagation();
+      this.onAnswer?.(a.id);
+    };
+    root.append(bubble, name, talk, ask);
     this.layer.appendChild(root);
     const t = { root, bubble, name, lastBubble: '' };
     this.tags.set(a.id, t);

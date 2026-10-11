@@ -20,6 +20,7 @@ import { mergeStatic, trimShadowCasters, AdaptiveResolution } from './perf';
 import { AvatarPicker, savedAvatar } from './avatar';
 import { Dispatch } from './dispatch';
 import { APP_NAME, APP_TAGLINE } from './brand';
+import { AnswerCard } from './answer';
 
 document.title = APP_NAME;
 document.getElementById('appname')!.textContent = APP_NAME;
@@ -137,6 +138,43 @@ trimShadowCasters(player.agent.rig.root);
 const social = new Social(office, player, tease);
 const picker = new AvatarPicker();
 const dispatch = new Dispatch(office, director, world, sound);
+const answerCard = new AnswerCard();
+answerCard.onAnswered = (a) => {
+  a.react({ name: 'thanks', dur: 1.2, hold: false, pose: () => 'happy' });
+};
+hud.onAnswer = (id) => {
+  const a = office.agents.get(id);
+  if (!a?.pendingAsk) return;
+  if (player.mode === 'orbit') hud.follow(id); // glide over to them
+  answerCard.open(a);
+};
+let askHintUntil = 0;
+office.onAsk = (a) => {
+  askHintUntil = performance.now() + 8000;
+  askHintText = `${a.name} has a question: walk over and press E${player.mode === 'orbit' ? ' (or click the ❓)' : ''}`;
+};
+let askHintText = '';
+/** Nearest agent with an open question within reach (walk modes). */
+function askTarget() {
+  if (!player.spawned || player.mode === 'orbit') return null;
+  let best = null as null | ReturnType<typeof office.agents.get>;
+  let bd = 2.6;
+  for (const a of office.agents.values()) {
+    if (!a.pendingAsk || a.removed) continue;
+    const d = a.position.distanceTo(player.position);
+    if (d < bd) {
+      bd = d;
+      best = a;
+    }
+  }
+  return best;
+}
+// tell the server whether the office is on screen: questions are only held for you while it is
+const presence = () =>
+  fetch('/api/presence', { method: 'POST', headers: { 'content-type': 'application/json', 'x-agent-office': '1' }, body: JSON.stringify({ visible: !document.hidden }) }).catch(() => {});
+presence();
+setInterval(presence, 10_000);
+document.addEventListener('visibilitychange', presence);
 const hintEl = document.getElementById('hint')!;
 document.getElementById('dispatchBtn')!.onclick = () => dispatch.toggle();
 dispatch.onOpenChange = (open) => {
@@ -236,6 +274,10 @@ addEventListener('keydown', (e) => {
     chat.close();
     return;
   }
+  if (k === 'escape' && answerCard.isOpen) {
+    answerCard.close();
+    return;
+  }
   if (k === 'escape' && dispatch.isOpen) {
     dispatch.close();
     return;
@@ -261,7 +303,10 @@ addEventListener('keydown', (e) => {
   if (k === 'v') viewBtn.click();
   else if (k === 'e') {
     spawnPlayer();
-    if (player.seat) {
+    const asking = askTarget();
+    if (asking) {
+      answerCard.open(asking);
+    } else if (player.seat) {
       player.standUp();
     } else if (nearManagerChair()) {
       // take the boss chair and open the dispatch panel
@@ -291,6 +336,16 @@ function connect() {
   es.addEventListener('replay', (m) => {
     const events = JSON.parse((m as MessageEvent).data) as OfficeEvent[];
     director.replay(events);
+    // questions older than the replay window are still waiting: put those raised hands back too
+    fetch('/api/asks', { headers: { 'x-agent-office': '1' } })
+      .then((r) => r.json())
+      .then((j) => {
+        for (const q of j.asks ?? []) {
+          const known = [...office.agents.values()].some((a) => a.pendingAsk?.id === q.id);
+          if (!known) director.handle({ id: 0, t: Date.now(), kind: 'Ask', session: q.session, agentId: q.agentId, project: '', detail: q.summary, ask: q });
+        }
+      })
+      .catch(() => {});
     events.slice(-25).forEach((e) => hud.log(e));
     hud.setConn('live');
   });
@@ -449,7 +504,17 @@ function frame(dt: number) {
   talkAcc += dt;
   if (talkAcc > 0.1) {
     talkAcc = 0;
-    const hint = nearManagerChair() ? 'Press E to sit at the manager desk' : player.seat ? 'Move to stand up · E to leave the desk' : '';
+    const near = askTarget();
+    const hint = near
+      ? `Press E to answer ${near.name}`
+      : performance.now() < askHintUntil
+        ? askHintText
+        : nearManagerChair()
+          ? 'Press E to sit at the manager desk'
+          : player.seat
+            ? 'Move to stand up · E to leave the desk'
+            : '';
+    answerCard.update();
     hintEl.textContent = hint;
     hintEl.classList.toggle('show', !!hint);
     const t = chat.isOpen ? null : talkTarget();

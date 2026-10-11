@@ -5,6 +5,7 @@ import type { ServerResponse, IncomingMessage } from 'node:http';
 import path from 'node:path';
 import { handleChat, type SessionInfo } from './chat';
 import { handleRuns } from './runs';
+import { handleAsk, handleAnswer, markVisible, pendingAsks, type AskPayload } from './asks';
 import fs from 'node:fs';
 
 export interface OfficeEvent {
@@ -22,6 +23,8 @@ export interface OfficeEvent {
   /** set on events from tasks dispatched at the manager desk */
   runId?: string;
   ok?: boolean;
+  /** questions / permission prompts waiting for an answer in the office */
+  ask?: AskPayload | { id: string; how: string };
   tool?: string;
   toolUseId?: string;
   detail?: string;
@@ -149,6 +152,7 @@ export function normalize(raw: Record<string, any>): OfficeEvent {
   else if (kind === 'Notification') detail = clip(raw.message, 80);
   else if (kind === 'SessionStart') detail = clip(raw.source, 20);
   else if (kind === 'RunDone') detail = String(raw.summary ?? '').slice(0, 1500);
+  else if (kind === 'Ask') detail = String(raw.ask?.summary ?? '');
   return {
     id: nextId++,
     t: Date.now(),
@@ -161,6 +165,7 @@ export function normalize(raw: Record<string, any>): OfficeEvent {
     toolUseId: raw.tool_use_id ? String(raw.tool_use_id) : undefined,
     runId: raw.office_run ? String(raw.office_run) : undefined,
     ok: typeof raw.ok === 'boolean' ? raw.ok : undefined,
+    ask: raw.ask,
     detail,
   };
 }
@@ -202,6 +207,36 @@ const middleware: Connect.NextHandleFunction = async (req, res, next) => {
   if (url.startsWith('/api/projects') || url.startsWith('/api/models') || url.startsWith('/api/runs') || url.startsWith('/api/run')) {
     const body = req.method === 'POST' ? await readBody(req) : '';
     await handleRuns(req, res, body, () => [...sessions.values()].map((s) => s.cwd ?? ''), (raw) => broadcast({ ...normalize(raw), ...modelFor(raw) }));
+    return;
+  }
+  if (url.startsWith('/api/asks') && req.method === 'GET') {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify(req.headers['x-agent-office'] === '1' ? { ok: true, asks: pendingAsks() } : { ok: false }));
+    return;
+  }
+  if (url.startsWith('/api/ask') && req.method === 'POST') {
+    // long-poll from the ask hook: held open until you answer in the office
+    handleAsk(req, res, await readBody(req), (raw) => broadcast({ ...normalize(raw), ...modelFor(raw) }));
+    return;
+  }
+  if ((url.startsWith('/api/answer') || url.startsWith('/api/presence')) && req.method === 'POST') {
+    if (req.headers['x-agent-office'] !== '1') {
+      res.statusCode = 403;
+      res.end();
+      return;
+    }
+    const body = await readBody(req);
+    if (url.startsWith('/api/presence')) {
+      try {
+        markVisible(!!JSON.parse(body || '{}').visible);
+      } catch {
+        /* ignore */
+      }
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+    handleAnswer(res, body, (raw) => broadcast({ ...normalize(raw), ...modelFor(raw) }));
     return;
   }
   if (url.startsWith('/api/chat') && req.method === 'POST') {

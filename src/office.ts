@@ -3,7 +3,7 @@ import * as THREE from 'three';
 import { Agent, type Action } from './agent';
 import { variantFor } from './character';
 import { hex } from './palette';
-import { modelLabel, type Activity, type SpawnOptions, type Stage } from './types';
+import { modelLabel, type Activity, type AskPayload, type SpawnOptions, type Stage } from './types';
 import type { Desk, Spot, World } from './world';
 import type { Effects } from './effects';
 import type { Sound } from './sound';
@@ -201,6 +201,37 @@ export class Office implements Stage {
     const label = modelLabel(model);
     if (!a || a.model === label) return;
     a.model = label;
+    this.onChange?.();
+  }
+
+  private asks = new Map<string, string>(); // askId -> character id
+  onAsk?: (a: Agent) => void;
+
+  ask(id: string, ask: AskPayload) {
+    const a = this.agents.get(id);
+    if (!a) return;
+    this.asks.set(ask.id, id);
+    a.pendingAsk = ask;
+    a.notifying = true; // raise a hand
+    a.say((ask.type === 'permission' ? '🔐 ' : '❓ ') + ask.summary, 'alert', 600);
+    this.emote(a, ask.type === 'permission' ? 'exclaim' : 'question', 2);
+    this.sound.ding(a.position.clone().setY(1.3));
+    this.onAsk?.(a);
+    this.onChange?.();
+  }
+
+  clearAsk(askId: string, how: string) {
+    const id = this.asks.get(askId);
+    this.asks.delete(askId);
+    const a = id ? this.agents.get(id) : undefined;
+    if (!a || a.pendingAsk?.id !== askId) return;
+    a.pendingAsk = null;
+    a.notifying = false;
+    if (a.bubble?.tone === 'alert') a.bubble.until = performance.now();
+    if (how === 'answered') {
+      a.say(pick(['Thanks! 🙏', 'Got it, thank you!', 'Perfect, thanks!']), 'say', 2);
+      this.emote(a, 'heart', 1.4);
+    }
     this.onChange?.();
   }
 

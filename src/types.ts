@@ -10,9 +10,26 @@ export interface OfficeEvent {
   subModel?: string;
   runId?: string;
   ok?: boolean;
+  ask?: AskPayload & { how?: string };
   tool?: string;
   toolUseId?: string;
   detail?: string;
+}
+
+export interface AskQuestion {
+  question: string;
+  header?: string;
+  multiSelect?: boolean;
+  options: { label: string; description?: string }[];
+}
+
+/** A question (AskUserQuestion) or permission prompt waiting for the user's answer. */
+export interface AskPayload {
+  id: string;
+  type: 'question' | 'permission';
+  tool?: string;
+  summary: string;
+  questions?: AskQuestion[];
 }
 
 export type ActivityKind =
@@ -57,6 +74,8 @@ export interface Stage {
   setModel(id: string, model: string): void;
   /** A task dispatched from the manager desk finished: come back, report, leave. */
   report(id: string, ok: boolean, summary: string): void;
+  ask(id: string, ask: AskPayload): void;
+  clearAsk(askId: string, how: string): void;
 }
 
 /** "claude-opus-5-5" → "Opus 5.5", "haiku" → "Haiku", "glm-5.3" → "GLM 5.3". */

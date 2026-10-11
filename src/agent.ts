@@ -204,6 +204,8 @@ export class Agent {
   onSay?: (text: string, tone: Bubble['tone']) => void;
   /** Silence the babble voice while a real text-to-speech voice is talking. */
   muteBabble = false;
+  /** A question or permission prompt this agent is waiting on you to answer. */
+  pendingAsk: import('./types').AskPayload | null = null;
 
   say(text: string, tone: Bubble['tone'] = 'say', seconds = 4) {
     this.bubble = { text, tone, until: performance.now() + seconds * 1000 };
@@ -225,7 +227,7 @@ export class Agent {
       this.leanedThisRun = false;
     }
     this.activity = a;
-    this.notifying = false;
+    this.notifying = !!this.pendingAsk; // keep the hand up while a question is open
     this.toolDoneAt = 0;
   }
 

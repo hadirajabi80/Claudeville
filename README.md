@@ -84,9 +84,15 @@ In third person, drag to look around and scroll to zoom. In first person, click 
 
 Everything is synthesized in the browser with 3D positional audio, so you hear each sound from where it happens: footsteps on wood and rug, keyboards clacking at busy desks, little babbling voices when agents talk, the door, the coffee machine, birds outside, celebrations, and a gentle lo-fi soundtrack. Sound starts on your first click or key press. Use 🔊 to mute and 🎵 (or M) for the music.
 
+## Questions from agents
+
+When an agent or a subagent needs you, a multiple-choice question or a permission prompt such as "can I run `npm test`?", it raises its hand and shows the question above its head with a pulsing ❓. Walk over and press **E**, or click the ❓ above its head or in the session list, and answer in the card: pick an option (or type your own), or Allow / Deny a permission. The answer goes straight back to Claude Code.
+
+This works through a waiting hook that is only active while Claudeville is open in a visible tab. If the office is hidden, if you do not answer within four minutes, or if you click **Answer in Claude Code instead**, Claude Code asks you the normal way. Tasks dispatched from the manager desk run non-interactively, so they cannot ask multiple-choice questions.
+
 ## The manager desk
 
-Walk up to the big desk at the front and press **E** to sit in the boss chair, or click **🗂️ Dispatch** from anywhere. Pick a model, a project folder and what the agent may do (edit files, or edit files and run commands), write the task and ring the bell. A new agent walks in, takes the task, works on it for real at a free desk (a  run in that folder), then comes back to your desk to report and leaves. The task list shows live status, a Stop button and the final report.
+Walk up to the big desk at the front and press **E** to sit in the boss chair, or click **🗂️ Dispatch** from anywhere. Pick a model, a project folder and what the agent may do (edit files, or edit files and run commands), write the task and ring the bell. A new agent walks in, takes the task, works on it for real at a free desk (a `claude -p` run in that folder), then comes back to your desk to report and leaves. The task list shows live status, a Stop button and the final report.
 
 Models your API key cannot use are crossed out automatically after the first refusal; **Default** always uses the model your Claude Code is set to.
 
