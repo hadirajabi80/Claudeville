@@ -1151,3 +1151,62 @@ body.dispatching .helpbox {
   opacity: 0.4;
   text-decoration: line-through;
 }
+
+/* ------------------------------------------------------------ voice chat */
+#chat .spk {
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font-size: 15px;
+}
+#chat .spk.off {
+  opacity: 0.35;
+}
+#chat .vbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 11.5px;
+  color: var(--muted);
+  border-bottom: 1px solid rgba(43, 43, 46, 0.06);
+}
+#chat .vbar select {
+  border: 1px solid rgba(43, 43, 46, 0.15);
+  border-radius: 6px;
+  font-size: 11.5px;
+  padding: 1px 4px;
+  background: #fff;
+}
+#chat .vhint {
+  margin-left: auto;
+  font-size: 10.5px;
+}
+#chat .mic {
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: inset 0 0 0 1px rgba(43, 43, 46, 0.15);
+  font-size: 15px;
+  cursor: pointer;
+  flex: none;
+}
+#chat .mic:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+#chat .mic.live {
+  background: #e05d5d;
+  box-shadow: 0 0 0 0 rgba(224, 93, 93, 0.6);
+  animation: mic 1.2s infinite;
+}
+@keyframes mic {
+  0% {
+    box-shadow: 0 0 0 0 rgba(224, 93, 93, 0.55);
+  }
+  100% {
+    box-shadow: 0 0 0 12px rgba(224, 93, 93, 0);
+  }
+}

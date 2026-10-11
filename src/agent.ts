@@ -202,6 +202,8 @@ export class Agent {
   }
 
   onSay?: (text: string, tone: Bubble['tone']) => void;
+  /** Silence the babble voice while a real text-to-speech voice is talking. */
+  muteBabble = false;
 
   say(text: string, tone: Bubble['tone'] = 'say', seconds = 4) {
     this.bubble = { text, tone, until: performance.now() + seconds * 1000 };

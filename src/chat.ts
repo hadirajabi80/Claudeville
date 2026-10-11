@@ -9,6 +9,7 @@ import { hex } from './palette';
 import { verb } from './office';
 import { setMouth } from './character';
 import * as R from './reactions';
+import { Voice, type VoiceLang } from './voice';
 
 interface Msg {
   from: 'user' | 'agent' | 'error';
@@ -36,6 +37,14 @@ export class Chat {
   private sendBtn: HTMLButtonElement;
   private chips: HTMLElement;
   private head: { swatch: HTMLElement; name: HTMLElement; sub: HTMLElement; act: HTMLElement };
+  readonly voice = new Voice();
+  private micBtn!: HTMLButtonElement;
+  private speakBtn!: HTMLButtonElement;
+  private langSel!: HTMLSelectElement;
+  private speakReplies = true;
+  private voiceLang: VoiceLang = 'en-US';
+  private pushToTalk = false;
+  private warnedNoVoice = false;
   agentIdOf: (officeId: string) => string | undefined = () => undefined;
   onOpenChange?: (open: boolean) => void;
 
@@ -49,11 +58,18 @@ export class Chat {
       <header>
         <i class="sw"></i>
         <div class="who"><b class="nm"></b> <small class="sb"></small><div class="act"></div></div>
+        <button class="spk" title="Read replies aloud">🔊</button>
         <button class="x" title="Close (Esc)">✕</button>
       </header>
+      <div class="vbar">
+        <span>🎤 Speak in</span>
+        <select class="vlang"><option value="en-US">English</option><option value="fa-IR">Persian</option></select>
+        <span class="vhint">Click the mic, or hold R near an agent</span>
+      </div>
       <div class="msgs"></div>
       <div class="chips"></div>
       <div class="inrow">
+        <button class="mic" title="Talk (click to start, click again to send)">🎤</button>
         <textarea rows="1" dir="auto" placeholder="Ask something…"></textarea>
         <button class="send" title="Send (Enter)">➤</button>
       </div>`;
@@ -68,6 +84,7 @@ export class Chat {
       act: this.el.querySelector('.act')!,
     };
     this.el.querySelector('.x')!.addEventListener('click', () => this.close());
+    this.setupVoice();
     this.sendBtn.addEventListener('click', () => this.send(this.input.value));
     // typing must never move the player or trigger hotkeys
     const stop = (e: KeyboardEvent) => e.stopPropagation();
@@ -90,6 +107,91 @@ export class Chat {
     return !!this.agent;
   }
 
+  // ------------------------------------------------------------------ voice
+
+  private setupVoice() {
+    try {
+      const v = JSON.parse(localStorage.getItem('office-voice') ?? '{}');
+      if (v.lang === 'fa-IR' || v.lang === 'en-US') this.voiceLang = v.lang;
+      if (typeof v.speak === 'boolean') this.speakReplies = v.speak;
+    } catch {
+      /* ignore */
+    }
+    this.micBtn = this.el.querySelector('.mic')!;
+    this.speakBtn = this.el.querySelector('.spk')!;
+    this.langSel = this.el.querySelector('.vlang')!;
+    this.langSel.value = this.voiceLang;
+    const save = () => {
+      try {
+        localStorage.setItem('office-voice', JSON.stringify({ lang: this.voiceLang, speak: this.speakReplies }));
+      } catch {
+        /* ignore */
+      }
+    };
+    this.langSel.onchange = () => {
+      this.voiceLang = this.langSel.value as VoiceLang;
+      save();
+    };
+    this.langSel.addEventListener('keydown', (e) => e.stopPropagation());
+    const syncSpeak = () => {
+      this.speakBtn.classList.toggle('off', !this.speakReplies);
+      this.speakBtn.title = this.speakReplies ? 'Reading replies aloud (click to turn off)' : 'Replies are silent (click to read them aloud)';
+    };
+    syncSpeak();
+    this.speakBtn.onclick = () => {
+      this.speakReplies = !this.speakReplies;
+      if (!this.speakReplies) this.voice.stopSpeaking();
+      syncSpeak();
+      save();
+    };
+    if (!this.voice.canSpeak) this.speakBtn.style.display = 'none';
+    if (!this.voice.canListen) {
+      this.micBtn.disabled = true;
+      this.micBtn.title = 'Voice input needs Chrome or Edge';
+      (this.el.querySelector('.vbar') as HTMLElement).style.display = 'none';
+    }
+    this.micBtn.onclick = () => (this.voice.isListening ? this.stopVoice(true) : this.startVoice());
+    this.voice.onListenChange = (on) => {
+      this.micBtn.classList.toggle('live', on);
+      this.input.placeholder = on ? 'Listening… (click 🎤 again to send)' : 'Ask something…';
+      if (on && this.agent) {
+        this.office.emote(this.agent, 'question', 1.2);
+        this.sound.duckFor(1.5);
+      }
+    };
+    this.voice.onTranscript = (text) => {
+      this.input.value = text;
+      this.input.dispatchEvent(new Event('input'));
+    };
+    this.voice.onSend = (text) => this.send(text);
+    this.voice.onError = (msg) => this.toast(msg);
+  }
+
+  /** Start listening to the microphone (the chat must be open). */
+  startVoice(ptt = false) {
+    if (!this.agent || !this.voice.canListen || this.pending) return;
+    this.pushToTalk = ptt;
+    this.input.value = '';
+    this.voice.listen(this.voiceLang);
+  }
+
+  stopVoice(send: boolean) {
+    this.pushToTalk = false;
+    this.voice.stop(send);
+  }
+
+  get isPushToTalk() {
+    return this.pushToTalk;
+  }
+
+  private toast(msg: string) {
+    const t = document.createElement('div');
+    t.className = 'hint';
+    t.textContent = msg;
+    this.msgs.appendChild(t);
+    this.msgs.scrollTop = this.msgs.scrollHeight;
+  }
+
   /** Remember what each agent has been doing (also covers demo agents the server never saw). */
   track(e: OfficeEvent, officeId: string | null) {
     if (!officeId) return;
@@ -99,7 +201,7 @@ export class Chat {
     this.recent.set(officeId, list);
   }
 
-  open(a: Agent) {
+  open(a: Agent, focus = true) {
     if (a.role === 'player' || a.removed) return;
     if (this.agent === a) {
       this.input.focus();
@@ -117,7 +219,7 @@ export class Chat {
     this.office.emote(a, 'exclaim', 1);
     a.say(pick(['Yes?', 'Hi! What’s up?', 'Hm?', 'Yes, boss?']), 'say', 1.6);
     this.player.listenTarget = a.position;
-    setTimeout(() => this.input.focus(), 30);
+    if (focus) setTimeout(() => this.input.focus(), 30);
     this.onOpenChange?.(true);
   }
 
@@ -126,6 +228,9 @@ export class Chat {
     if (!a) return;
     this.pending?.abort();
     this.pending = null;
+    this.voice.cancel();
+    this.voice.stopSpeaking();
+    a.muteBabble = false;
     if (a.reaction?.name.startsWith('chat-')) a.endReaction();
     this.agent = null;
     this.player.listenTarget = null;
@@ -210,6 +315,10 @@ export class Chat {
   private answer(a: Agent, text: string) {
     this.push(a, { from: 'agent', text });
     if (this.agent !== a) return;
+    if (this.speakReplies && this.voice.canSpeak) {
+      this.speakAnswer(a, text);
+      return;
+    }
     const dur = Math.max(2, Math.min(8, 1.5 + text.length / 40));
     if (a.bubble?.tone === 'think') a.bubble.until = performance.now();
     this.setPhase('talk', dur);
@@ -218,6 +327,31 @@ export class Chat {
     this.sentences = short.split(/(?<=[.!?\u061F])\s+/).slice(1, 8);
     this.nextVoice = performance.now() + 1100;
     this.player.nod();
+  }
+
+  /** Real voice: the agent talks (mouth, gestures) for as long as the speech lasts. */
+  private async speakAnswer(a: Agent, text: string) {
+    const est = Math.max(2.5, Math.min(60, text.length / 13));
+    if (a.bubble?.tone === 'think') a.bubble.until = performance.now();
+    a.muteBabble = true;
+    const short = text.replace(/\s+/g, ' ');
+    a.say(short.length > 60 ? short.slice(0, 59) + '…' : short, 'say', est + 1);
+    this.setPhase('talk', est + 2);
+    this.sound.duckFor(est + 0.5);
+    this.player.nod();
+    const ok = await this.voice.speak(text, { gender: a.rig.gender, pitch: a.role === 'sub' ? 1.15 : a.rig.gender === 'f' ? 1.1 : 0.95 });
+    a.muteBabble = false;
+    if (!ok) {
+      if (!this.warnedNoVoice) {
+        this.warnedNoVoice = true;
+        this.toast(/[\u0600-\u06FF]/.test(text) ? 'This browser has no Persian voice installed, so the reply is shown as text. Edge has Persian voices.' : 'No speech voice is available in this browser.');
+      }
+      this.sentences = short.split(/(?<=[.!?\u061F])\s+/).slice(0, 8);
+      this.nextVoice = performance.now();
+      this.talkUntil = performance.now() + Math.min(8, est) * 1000;
+      return;
+    }
+    if (this.agent === a && a.reaction?.name === 'chat-talk') this.setPhase('listen');
   }
 
   private push(a: Agent, m: Msg) {

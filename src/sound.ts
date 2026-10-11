@@ -366,6 +366,11 @@ export class Sound {
     if (this.ctx && this.musicOn) this.music.gain.setTargetAtTime(this.musicBase, this.ctx.currentTime, 0.5);
   }
 
+  /** Keep the music down while someone is really speaking. */
+  duckFor(sec: number) {
+    this.duckMusic(sec);
+  }
+
   private duckMusic(sec: number) {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;

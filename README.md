@@ -98,6 +98,10 @@ The first time you step in you pick a male or female character and a name. Chang
 
 Click 💬 next to any agent in the session list, or walk up to an agent and press **T**. Ask anything, in English or Persian: what it is working on, why a command failed, what is next. The answer comes from a short read-only Claude run that sees the agent's recent actions and the end of its real session transcript, and it may read project files but never changes anything. While you wait, the agent turns to you and thinks with a hand on its chin, then talks with its hands and a little voice. Press Esc to close the chat.
 
+### Talk by voice
+
+Click 🎤 in the chat window and speak, then click it again to send. Or walk up to an agent and **hold R**, speak, and let go: it works like a walkie-talkie. Choose English or Persian under the chat header. Agents read their answers aloud with a voice that matches them (🔊 turns this off). Voice uses the browser's built-in speech features, so it works best in Chrome or Edge, and Persian voices for reading answers aloud are available in Edge.
+
 ## Controls
 
 Drag to orbit, scroll to zoom, click a name tag or a session row to follow that agent. The speaker button turns on keyboard clacks and chimes.

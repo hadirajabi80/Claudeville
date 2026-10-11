@@ -85,7 +85,7 @@ export class Office implements Stage {
     };
     a.onSay = (text, tone) => {
       // tool bubbles change constantly: only real lines get a voice, and not too often per agent
-      if (tone === 'tool') return;
+      if (tone === 'tool' || a.muteBabble) return;
       const now = performance.now();
       if (now - (this.voiceAt.get(a.id) ?? 0) < 700) return;
       this.voiceAt.set(a.id, now);

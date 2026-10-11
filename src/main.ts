@@ -225,6 +225,9 @@ player.onModeChange = (m) => {
 };
 viewBtn.onclick = () => (player.mode === 'orbit' ? setMode('third') : player.mode === 'third' ? setMode('first') : setMode('orbit'));
 player.onFirstMove = () => setMode('third');
+addEventListener('keyup', (e) => {
+  if (e.key.toLowerCase() === 'r' && chat.isPushToTalk) chat.stopVoice(true);
+});
 addEventListener('keydown', (e) => {
   const tag = (e.target as HTMLElement)?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || e.repeat) return;
@@ -235,6 +238,16 @@ addEventListener('keydown', (e) => {
   }
   if (k === 'escape' && dispatch.isOpen) {
     dispatch.close();
+    return;
+  }
+  // walkie-talkie: hold R near an agent (or with one followed / chatting), speak, release to send
+  if (k === 'r' && chat.voice.canListen) {
+    const a = chat.agent ?? talkTarget() ?? (hud.followId ? office.agents.get(hud.followId) : null);
+    if (a) {
+      e.preventDefault();
+      if (!chat.isOpen || chat.agent !== a) chat.open(a, false);
+      chat.startVoice(true);
+    }
     return;
   }
   if (k === 't' || (k === 'enter' && !chat.isOpen)) {
