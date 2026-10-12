@@ -41,6 +41,8 @@ const SOURCE_ROOM: Record<string, number> = { claude: 0, codex: 1, cursor: 2, zc
 export class Director {
   private leads = new Map<string, LeadInfo>(); // by session
   private subs = new Map<string, SubInfo>(); // by character id
+  /** sessions you carried into another room: they (and their subagents) live there from now on */
+  private movedRooms = new Map<string, number>();
   private instant = false;
   onChange?: () => void;
 
@@ -203,6 +205,13 @@ export class Director {
     };
   }
 
+  /** A session's agent was carried into another room: new subagents (and a respawned lead) go there too. */
+  moveSession(session: string, room: number) {
+    this.movedRooms.set(session, room);
+    const lead = this.leads.get(session);
+    if (lead) lead.room = room;
+  }
+
   // ---------------------------------------------------------------------------
 
   private ensureLead(e: OfficeEvent, now: number): LeadInfo {
@@ -213,7 +222,7 @@ export class Director {
       this.leads.set(e.session, lead);
     }
     if (!lead) {
-      lead = { id: `lead:${e.session}`, session: e.session, working: false, last: now, room: SOURCE_ROOM[e.source ?? 'claude'] ?? 0 };
+      lead = { id: `lead:${e.session}`, session: e.session, working: false, last: now, room: this.movedRooms.get(e.session) ?? SOURCE_ROOM[e.source ?? 'claude'] ?? 0 };
       this.leads.set(e.session, lead);
       if (!this.stage.has(lead.id)) {
         this.stage.spawn(lead.id, {

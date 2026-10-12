@@ -144,6 +144,11 @@ tease.setTool('hand');
 
 // ------------------------------------------------------------------ your own character
 const colliders = new Colliders(worlds, yard.grounds);
+// agents you drop land clear of the furniture; carried into another room, their session moves there
+office.settle = (p) => void colliders.resolve(p, 0.25);
+office.onRoomChange = (a) => {
+  if (a.role === 'lead') director.moveSession(a.session, a.room);
+};
 const player = new Player(scene, colliders, office, sound, fx, renderer.domElement);
 trimShadowCasters(player.agent.rig.root);
 const social = new Social(office, player, tease);

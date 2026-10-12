@@ -23,7 +23,6 @@ interface Ball {
   looked?: boolean;
 }
 
-const FLOOR_BOUNDS = { x0: -6.8, x1: 6.8, z0: -4.7, z1: 8.7 }; // in the room's own frame
 const GRAVITY = 9.8;
 
 export interface TeaseDeps {
@@ -363,8 +362,8 @@ export class Tease {
       a.react({
         ...R.landed(a),
         onDone: () => {
-          // walk back to wherever the live session needs this agent
-          this.d.office.resume(a.id);
+          // stay where you were put (or move into the room you were dropped in)
+          this.d.office.placed(a.id);
           if ((this.annoy.get(a.id) ?? 0) >= 6) this.retaliate(a);
         },
       });
@@ -576,9 +575,8 @@ export class Tease {
     if (this.dragging) {
       const p = new THREE.Vector3();
       if (this.planeHit(1.55, p)) {
-        const o = this.d.office.worldOf(this.dragging).origin;
-        p.x = THREE.MathUtils.clamp(p.x, o.x + FLOOR_BOUNDS.x0, o.x + FLOOR_BOUNDS.x1);
-        p.z = THREE.MathUtils.clamp(p.z, o.z + FLOOR_BOUNDS.z0, o.z + FLOOR_BOUNDS.z1);
+        // carry them anywhere: into another room, the game room or out to the yard
+        this.d.office.clampToGround(p);
         p.y = 0.45;
         this.dragging.holdAt(p, dt);
       }

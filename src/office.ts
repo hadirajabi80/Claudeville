@@ -4,7 +4,7 @@ import { Agent, type Action } from './agent';
 import { variantFor } from './character';
 import { hex } from './palette';
 import { modelLabel, type Activity, type AskPayload, type SpawnOptions, type Stage } from './types';
-import { localOf, isSeat, isBreak, GAME_ROOM, type Desk, type Spot, type World } from './world';
+import { localOf, isSeat, isBreak, GAME_ROOM, YARD, type Desk, type Spot, type World } from './world';
 import type { Campus } from './campus';
 import type { Effects } from './effects';
 import type { Sound } from './sound';
@@ -57,6 +57,11 @@ export class Office implements Stage {
   outings: Spot[] = [];
   /** when each idle agent next gets up to go somewhere else (simulation seconds) */
   private wanderAt = new Map<string, number>();
+  private lastG = 0;
+  /** push a point out of furniture (set by main from the collision world) */
+  settle?: (p: THREE.Vector3) => void;
+  /** an agent was carried into another office room and now belongs there */
+  onRoomChange?: (a: Agent) => void;
 
   /** The Claude room by default. */
   get world() {
@@ -430,6 +435,63 @@ export class Office implements Stage {
     this.resumeFn.get(id)?.();
   }
 
+  /** Where an agent may be carried: any room's floor or the yard (the nearest of them to the cursor). */
+  clampToGround(p: THREE.Vector3) {
+    const boxes = this.worlds.map((w) => ({ x0: w.origin.x - 6.7, x1: w.origin.x + 6.7, z0: w.origin.z - 4.6, z1: w.origin.z + 8.6 }));
+    boxes.push({ x0: YARD.x0 + 0.7, x1: YARD.x1 - 0.7, z0: YARD.z0 + 1.1, z1: YARD.z1 - 0.7 });
+    let best: { x: number; z: number; d: number } | null = null;
+    for (const b of boxes) {
+      const x = THREE.MathUtils.clamp(p.x, b.x0, b.x1);
+      const z = THREE.MathUtils.clamp(p.z, b.z0, b.z1);
+      const d = (x - p.x) ** 2 + (z - p.z) ** 2;
+      if (!best || d < best.d) best = { x, z, d };
+    }
+    p.x = best!.x;
+    p.z = best!.z;
+    return p;
+  }
+
+  /**
+   * Someone carried this agent somewhere and let go. Dropped in another office room, it moves in there
+   * (and takes a desk there if it is working). Otherwise a working agent goes back to its desk, and an idle
+   * one simply stays where it was put for a few minutes.
+   */
+  placed(id: string) {
+    const a = this.agents.get(id);
+    if (!a || a.removed) return;
+    this.settle?.(a.position);
+    const prev = this.target.get(a.id) ?? null;
+    const working = prev?.kind === 'desk' || prev?.kind === 'board' || prev?.kind === 'visit';
+    const r = this.campus.regionOf(a.position);
+    const moved = r >= 0 && r !== a.room && !this.worlds[r].isGame;
+    const free = (s: Spot | null) => {
+      if (s && s.occupant === a.id) this.releaseSpot(s);
+    };
+    if (moved) {
+      a.room = r;
+      this.onRoomChange?.(a);
+      this.onChange?.();
+    }
+    if (working) {
+      if (!moved) return this.resume(id);
+      // a new room, a new desk
+      free(prev);
+      free(a.spot);
+      this.target.set(a.id, null);
+      a.spot = null;
+      return this.work(id, false);
+    }
+    free(prev);
+    if (a.spot !== prev) free(a.spot);
+    const here: Spot = { kind: 'stand', pos: a.position.clone().setY(0), yaw: a.yawAngle, node: '', approach: [], occupant: a.id };
+    here.key = this.campus.nearest(here.pos);
+    a.spot = here;
+    this.target.set(a.id, here);
+    a.plan([{ kind: 'rest' }]);
+    this.resumeFn.set(a.id, () => this.moveTo(a, here, [{ kind: 'rest' }], [], true));
+    this.wanderAt.set(a.id, this.lastG + 150 + Math.random() * 90);
+  }
+
   emote(a: Agent, k: EmoteKind, dur = 1.5) {
     let f = this.anchors.get(a.id);
     if (!f) {
@@ -581,6 +643,7 @@ export class Office implements Stage {
       if (a.walking) this.worlds.forEach((w, i) => (near[i] ||= Math.hypot(p.x - w.doorPos.x, p.z - w.doorPos.z) < 1.7));
       if (a.busyWorking && a.seated && (a.activity?.kind === 'write' || a.activity?.kind === 'search')) typing++;
     }
+    this.lastG = g;
     this.wander(g);
     this.updatePlay();
     this.worlds.forEach((w, i) => {
