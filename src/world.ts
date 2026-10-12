@@ -4,15 +4,28 @@ import { C } from './palette';
 import { Screen, drawSparkle } from './screen';
 import { sparkleShape } from './character';
 import { APP_NAME } from './brand';
+import { buildGameRoom, type GameRoom } from './gameroom';
 
 export interface Spot {
   pos: THREE.Vector3; // where the character's root stands/sits
   yaw: number; // facing
   approach: THREE.Vector3[]; // points walked after the graph node, before arriving
   node: string; // graph node this spot hangs off
-  kind: 'desk' | 'couch' | 'stand' | 'board' | 'visit';
+  kind: SpotKind;
   occupant?: string;
+  /** key of the node in the building-wide walk graph (set once the room is placed) */
+  key?: string;
+  /** spots that belong together (the two ends of a ping-pong table…): agents like to join a game */
+  group?: string;
 }
+/**
+ * desk / couch / game (a couch seat with a controller) are seats; stand, play (foosball, arcade) and pong are on foot;
+ * board and visit are working spots.
+ */
+export type SpotKind = 'desk' | 'couch' | 'game' | 'stand' | 'play' | 'pong' | 'board' | 'visit';
+export const isSeat = (k: SpotKind | undefined) => k === 'desk' || k === 'couch' || k === 'game';
+/** Spots for a break (where idle agents hang out and wander between). */
+export const isBreak = (k: SpotKind | undefined) => k === 'couch' || k === 'game' || k === 'stand' || k === 'play' || k === 'pong';
 
 export interface Desk extends Spot {
   index: number;
@@ -32,11 +45,11 @@ const AISLE_Z = -0.75;
 
 /** What makes each room different: name, accent colour, wall emblem. */
 export interface RoomTheme {
-  key: 'claude' | 'codex' | 'cursor' | 'zcode' | 'work';
+  key: 'claude' | 'codex' | 'cursor' | 'zcode' | 'work' | 'game';
   name: string;
   short: string;
   accent: number;
-  emblem: 'sparkle' | 'knot' | 'cube' | 'zed' | 'gears';
+  emblem: 'sparkle' | 'knot' | 'cube' | 'zed' | 'gears' | 'pad';
 }
 
 export const ROOMS: RoomTheme[] = [
@@ -45,7 +58,10 @@ export const ROOMS: RoomTheme[] = [
   { key: 'cursor', name: 'Cursor', short: 'Cursor', accent: 0x5b6472, emblem: 'cube' },
   { key: 'zcode', name: 'Z Code', short: 'Z Code', accent: 0x3b6cf6, emblem: 'zed' },
   { key: 'work', name: 'Work Room', short: 'Work', accent: 0x8a5cf6, emblem: 'gears' },
+  { key: 'game', name: 'Game Room', short: 'Game', accent: 0xe0457b, emblem: 'pad' },
 ];
+/** Index of the game room: nobody works there, everybody plays there. */
+export const GAME_ROOM = 5;
 
 /**
  * Rooms are square cells on a grid ([column, row]); neighbours share a wall with a doorway in it.
@@ -58,9 +74,12 @@ export const GRID: [number, number][] = [
   [2, 0],
   [0, 1],
   [1, 1],
+  [2, 1],
 ];
-/** The empty cell of the grid holds a little garden. */
-export const GARDEN_CELL: [number, number] = [2, 1];
+/** The yard in front of the bottom row of rooms (world coordinates). */
+export const YARD = { x0: -7, x1: 35, z0: 23, z1: 33 };
+/** Where the bottom-row rooms open onto the yard (local x of the gap in the hedge). */
+export const GATE = { x0: -0.5, x1: 1.5 };
 export const cellOrigin = (col: number, row: number) => new THREE.Vector3(col * ROOM_SIZE, 0, row * ROOM_SIZE);
 const roomAtCell = (col: number, row: number) => GRID.findIndex(([c, r]) => c === col && r === row);
 /** Doorway in the back wall (local x), used when another room sits behind this one. */
@@ -77,11 +96,11 @@ const DESK_X = [-2.5, 0, 2.5, 5.0];
 export const TABLE = { x: -2.5, z: 7.0, r: 0.55 };
 export const COOLER = { x: 4.4, z: 8.45, r: 0.3 };
 
-function std(color: number, opts: Partial<THREE.MeshStandardMaterialParameters> = {}) {
+export function std(color: number, opts: Partial<THREE.MeshStandardMaterialParameters> = {}) {
   return new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0, ...opts });
 }
 
-function box(w: number, h: number, d: number, m: THREE.Material, x: number, y: number, z: number, parent: THREE.Object3D, cast = true, receive = true) {
+export function box(w: number, h: number, d: number, m: THREE.Material, x: number, y: number, z: number, parent: THREE.Object3D, cast = true, receive = true) {
   const o = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
   o.position.set(x, y, z);
   o.castShadow = cast;
@@ -90,7 +109,7 @@ function box(w: number, h: number, d: number, m: THREE.Material, x: number, y: n
   return o;
 }
 
-function cyl(rt: number, rb: number, h: number, m: THREE.Material, x: number, y: number, z: number, parent: THREE.Object3D, seg = 16) {
+export function cyl(rt: number, rb: number, h: number, m: THREE.Material, x: number, y: number, z: number, parent: THREE.Object3D, seg = 16) {
   const o = new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, seg), m);
   o.position.set(x, y, z);
   o.castShadow = true;
@@ -99,7 +118,7 @@ function cyl(rt: number, rb: number, h: number, m: THREE.Material, x: number, y:
   return o;
 }
 
-function canvasTex(w: number, h: number, draw: (g: CanvasRenderingContext2D) => void) {
+export function canvasTex(w: number, h: number, draw: (g: CanvasRenderingContext2D) => void) {
   const c = document.createElement('canvas');
   c.width = w;
   c.height = h;
@@ -124,10 +143,11 @@ export class Nav {
     this.edges.get(a)!.add(b);
     this.edges.get(b)!.add(a);
   }
-  nearest(p: THREE.Vector3) {
+  nearest(p: THREE.Vector3, only?: (name: string) => boolean) {
     let best = '';
     let bd = Infinity;
     for (const [k, v] of this.nodes) {
+      if (only && !only(k)) continue;
       const d = (v.x - p.x) ** 2 + (v.z - p.z) ** 2;
       if (d < bd) {
         bd = d;
@@ -180,15 +200,15 @@ export class World {
 
   private door!: THREE.Object3D;
   private doorAngle = 0;
-  private logo!: THREE.Object3D;
+  logo!: THREE.Object3D;
   private plants: THREE.Object3D[] = [];
-  private clock!: { tex: THREE.CanvasTexture; g: CanvasRenderingContext2D };
-  private board!: { tex: THREE.CanvasTexture; g: CanvasRenderingContext2D };
-  private windowTex!: { tex: THREE.CanvasTexture; g: CanvasRenderingContext2D };
+  private clock?: { tex: THREE.CanvasTexture; g: CanvasRenderingContext2D };
+  private board?: { tex: THREE.CanvasTexture; g: CanvasRenderingContext2D };
+  private windowTex?: { tex: THREE.CanvasTexture; g: CanvasRenderingContext2D };
   sun?: THREE.DirectionalLight;
   private hemi?: THREE.HemisphereLight;
   private lastSecond = -1;
-  /** The manager's desk at the front of the room, where you sit and dispatch tasks. */
+  /** The manager's desk at the front of the room, where you sit and dispatch tasks (not in the game room). */
   manager!: {
     center: THREE.Vector3;
     seat: THREE.Vector3;
@@ -210,6 +230,17 @@ export class World {
   readonly openFront: boolean;
   /** potted plants: local x, z, scale and collision radius */
   readonly plantSpots: [number, number, number, number][];
+  /** the game room has consoles and tables instead of desks */
+  readonly isGame: boolean;
+  game?: GameRoom;
+  /** furniture you bump into, in local coordinates: boxes [cx, cz, half x, half z] and circles [x, z, r] */
+  readonly blockers = { boxes: [] as [number, number, number, number][], circles: [] as [number, number, number][] };
+  /** where neighbours' doorways join this room's walk graph: from the right-hand door and from the front arch */
+  readonly hub: { east: string; front: string };
+  /** this room opens onto the yard through a gap in the hedge */
+  readonly onYard: boolean;
+  /** the middle of the side door in the left wall */
+  readonly doorPos: THREE.Vector3;
 
   constructor(
     private scene: THREE.Scene,
@@ -222,6 +253,10 @@ export class World {
     this.backRoom = roomAtCell(col, row - 1);
     this.openRight = roomAtCell(col + 1, row) < 0;
     this.openFront = roomAtCell(col, row + 1) < 0;
+    this.isGame = theme.key === 'game';
+    this.doorPos = this.origin.clone().add(new THREE.Vector3(-7, 1.2, 3.5));
+    this.hub = this.isGame ? { east: 'C', front: 'C' } : { east: 'FRONT_M', front: 'TABLE' };
+    this.onYard = this.openFront && this.origin.z + 9 === YARD.z0;
     this.plantSpots = [
       [-6.5, -1.9, 1.1, 0.26],
       // the back-right corner is the arch when a room sits behind
@@ -234,12 +269,25 @@ export class World {
     // lights are shared by the whole building: only the first room creates them
     if (index === 0) this.lights();
     this.room();
-    this.buildDesks();
-    this.buildLounge();
-    this.decor();
-    this.buildManager();
+    if (this.isGame) {
+      this.coffeeCorner();
+      this.plantsAndCorner();
+      this.game = buildGameRoom(this);
+    } else {
+      this.buildDesks();
+      this.buildLounge();
+      this.decor();
+      this.plantsAndCorner();
+      this.buildManager();
+    }
     this.graph();
     this.placeAt(this.origin);
+    for (const sp of this.allSpots()) sp.key = `${index}:${sp.node}`;
+  }
+
+  /** Every spot an agent can go to in this room. */
+  allSpots(): Spot[] {
+    return [...this.desks, ...this.lounge, ...this.boards, ...(this.manager?.visitors ?? [])];
   }
 
   private lights() {
@@ -327,19 +375,34 @@ export class World {
     }
     box(T, 0.9, 1, wallM, -7 - T / 2, 2.55, 3.5, s);
 
-    // window (back wall), with a sky canvas that follows the local time
-    this.windowTex = canvasTex(256, 128, () => {});
-    const pane = new THREE.Mesh(
-      new THREE.PlaneGeometry(4, 1.6),
-      new THREE.MeshStandardMaterial({ map: this.windowTex.tex, emissive: 0xffffff, emissiveMap: this.windowTex.tex, emissiveIntensity: 0.55, roughness: 0.2 }),
-    );
-    pane.position.set(3.2, 1.95, -4.97);
-    s.add(pane);
+    // windows only in walls that face outside (a sky canvas that follows the local time);
+    // a wall shared with another room gets a pinboard instead
     const frameM = std(C.walnut);
-    box(4.12, 0.08, 0.08, frameM, 3.2, 2.79, -4.95, s, false);
-    box(4.12, 0.1, 0.16, frameM, 3.2, 1.12, -4.92, s, false);
-    for (const x of [1.16, 3.2, 5.24]) box(0.06, 1.7, 0.08, frameM, x, 1.95, -4.95, s, false);
-    this.drawWindow();
+    if (this.backRoom < 0 || this.leftRoom < 0) this.windowTex = canvasTex(256, 128, () => {});
+    const paneM = () =>
+      new THREE.MeshStandardMaterial({ map: this.windowTex!.tex, emissive: 0xffffff, emissiveMap: this.windowTex!.tex, emissiveIntensity: 0.55, roughness: 0.2 });
+    if (this.backRoom < 0) {
+      const pane = new THREE.Mesh(new THREE.PlaneGeometry(4, 1.6), paneM());
+      pane.position.set(3.2, 1.95, -4.97);
+      s.add(pane);
+      box(4.12, 0.08, 0.08, frameM, 3.2, 2.79, -4.95, s, false);
+      box(4.12, 0.1, 0.16, frameM, 3.2, 1.12, -4.92, s, false);
+      for (const x of [1.16, 3.2, 5.24]) box(0.06, 1.7, 0.08, frameM, x, 1.95, -4.95, s, false);
+    } else this.pinboard(s, frameM);
+    if (this.leftRoom < 0) {
+      // the outer side wall: a second window, past the door
+      const side = new THREE.Group();
+      side.position.set(-6.97, 0, 6.5);
+      side.rotation.y = Math.PI / 2;
+      s.add(side);
+      const pane = new THREE.Mesh(new THREE.PlaneGeometry(2.6, 1.4), paneM());
+      pane.position.y = 1.95;
+      side.add(pane);
+      box(2.72, 0.08, 0.08, frameM, 0, 2.69, 0.02, side, false);
+      box(2.72, 0.1, 0.16, frameM, 0, 1.22, 0.05, side, false);
+      for (const x of [-1.33, 0, 1.33]) box(0.06, 1.5, 0.08, frameM, x, 1.95, 0.02, side, false);
+    }
+    if (this.windowTex) this.drawWindow();
 
     // door: pivot on its +z edge so it swings into the room
     const pivot = new THREE.Group();
@@ -356,6 +419,68 @@ export class World {
     box(0.2, 0.08, 1.12, frameM, -6.95, 2.12, 3.5, s, false);
     // welcome mat
     box(0.9, 0.02, 1.1, std(C.terracotta), -6.45, 0.01, 3.5, s, false);
+  }
+
+  /** A cork board full of sticky notes and photos, where an inner wall would have had a window. */
+  private pinboard(s: THREE.Object3D, frameM: THREE.Material) {
+    const accent = '#' + this.theme.accent.toString(16).padStart(6, '0');
+    const { tex } = canvasTex(512, 192, (g) => {
+      g.fillStyle = '#C79E6E';
+      g.fillRect(0, 0, 512, 192);
+      for (let i = 0; i < 700; i++) {
+        g.fillStyle = i % 2 ? 'rgba(120,80,40,0.25)' : 'rgba(255,230,190,0.2)';
+        g.fillRect((i * 131) % 512, (i * 71) % 192, 2, 2);
+      }
+      const notes = ['#F7E27A', '#F5A7B8', '#A8DDB5', '#9CC8F0', accent, '#F7E27A', '#F5C48A', '#A8DDB5', '#F5A7B8'];
+      notes.forEach((c, i) => {
+        const x = 18 + i * 54 + ((i * 17) % 11);
+        const y = 22 + ((i * 37) % 3) * 50;
+        g.save();
+        g.translate(x + 22, y + 22);
+        g.rotate((((i * 29) % 9) - 4) * 0.03);
+        g.fillStyle = 'rgba(0,0,0,0.15)';
+        g.fillRect(-20, -18, 46, 46);
+        g.fillStyle = c;
+        g.fillRect(-23, -22, 46, 46);
+        g.strokeStyle = 'rgba(40,40,46,0.55)';
+        g.lineWidth = 2;
+        for (let k = 0; k < 3; k++) {
+          g.beginPath();
+          g.moveTo(-17, -10 + k * 9);
+          g.lineTo(3 + (((i + k) * 13) % 14), -10 + k * 9);
+          g.stroke();
+        }
+        g.fillStyle = '#C0392B';
+        g.beginPath();
+        g.arc(0, -18, 3.5, 0, Math.PI * 2);
+        g.fill();
+        g.restore();
+      });
+      // two polaroids
+      for (const [x, y, r, sky] of [
+        [140, 112, -0.08, '#8EC5E8'],
+        [370, 104, 0.07, '#F2A65A'],
+      ] as [number, number, number, string][]) {
+        g.save();
+        g.translate(x, y);
+        g.rotate(r);
+        g.fillStyle = '#FBFBF8';
+        g.fillRect(-30, -30, 60, 70);
+        g.fillStyle = sky;
+        g.fillRect(-25, -25, 50, 44);
+        g.fillStyle = '#7D9878';
+        g.beginPath();
+        g.arc(-6, 19, 20, Math.PI, 0);
+        g.fill();
+        g.restore();
+      }
+    });
+    const board = new THREE.Mesh(new THREE.PlaneGeometry(3.8, 1.42), new THREE.MeshStandardMaterial({ map: tex, roughness: 0.95 }));
+    board.position.set(3.2, 1.95, -4.97);
+    s.add(board);
+    box(3.92, 0.07, 0.06, frameM, 3.2, 2.69, -4.95, s, false);
+    box(3.92, 0.07, 0.06, frameM, 3.2, 1.21, -4.95, s, false);
+    for (const x of [1.27, 5.13]) box(0.07, 1.55, 0.06, frameM, x, 1.95, -4.95, s, false);
   }
 
   private buildDesks() {
@@ -433,6 +558,7 @@ export class World {
           leg.translateZ(0.12);
         }
 
+        this.blockers.boxes.push([x, z, 0.72, 0.37]);
         const pos = g.localToWorld(new THREE.Vector3(0, 0, 0.53));
         const side = g.localToWorld(new THREE.Vector3(0.62, 0, 0.53));
         const yaw = g.rotation.y + Math.PI;
@@ -511,8 +637,21 @@ export class World {
     for (const z of [1.0, 1.6, 2.2]) {
       this.lounge.push({ kind: 'couch', pos: new THREE.Vector3(-5.38, 0, z), yaw: Math.PI / 2, node: 'LOUNGE', approach: [new THREE.Vector3(-4.9, 0, z)] });
     }
-    // coffee corner
+    this.blockers.boxes.push([-5.52, 1.6, 0.45, 1.15], [-4.45, 1.6, 0.2, 0.47]); // couch incl. arms, low table
+    this.coffeeCorner();
+    for (const [x, z] of [
+      [-4.9, 3.7],
+      [-5.6, 4.1],
+    ]) {
+      this.lounge.push({ kind: 'stand', pos: new THREE.Vector3(x, 0, z), yaw: -Math.PI / 2 - 0.6, node: 'LOUNGE', approach: [] });
+    }
+  }
+
+  /** Counter with a coffee machine in the back-left corner, and two places to stand with a cup. */
+  coffeeCorner() {
+    const s = this.root;
     box(0.7, 0.9, 1.7, std(C.cream), -6.62, 0.45, -3.2, s);
+    this.blockers.boxes.push([-6.62, -3.2, 0.37, 0.87]);
     box(0.74, 0.04, 1.74, std(C.walnut), -6.62, 0.92, -3.2, s);
     const mach = new THREE.Group();
     mach.position.set(-6.65, 0.94, -3.2);
@@ -525,13 +664,7 @@ export class World {
     cyl(0.04, 0.035, 0.18, std(C.warmWhite), -6.6, 1.03, -2.6, s, 10);
     cyl(0.07, 0.07, 0.16, std(0xbfd8e8, { transparent: true, opacity: 0.7 }), -6.6, 1.02, -3.75, s, 12);
     for (const z of [-2.75, -3.6]) {
-      this.lounge.push({ kind: 'stand', pos: new THREE.Vector3(-5.85, 0, z), yaw: -Math.PI / 2, node: 'COFFEE', approach: [] });
-    }
-    for (const [x, z] of [
-      [-4.9, 3.7],
-      [-5.6, 4.1],
-    ]) {
-      this.lounge.push({ kind: 'stand', pos: new THREE.Vector3(x, 0, z), yaw: -Math.PI / 2 - 0.6, node: 'LOUNGE', approach: [] });
+      this.lounge.push({ kind: 'stand', pos: new THREE.Vector3(-5.85, 0, z), yaw: -Math.PI / 2, node: 'COFFEE', approach: [], group: 'coffee' });
     }
   }
 
@@ -578,6 +711,7 @@ export class World {
     }
 
     // bookshelf on the left wall
+    this.blockers.boxes.push([-6.78, -0.6, 0.2, 0.62]);
     const shelf = new THREE.Group();
     shelf.position.set(-6.8, 0, -0.6);
     s.add(shelf);
@@ -596,8 +730,13 @@ export class World {
       }
     }
 
-    // potted plants
-    for (const [x, z, sc] of this.plantSpots) {
+  }
+
+  /** Potted plants, and the front corner: a round standing table and a water cooler. */
+  private plantsAndCorner() {
+    const s = this.root;
+    for (const [x, z, sc, r] of this.plantSpots) {
+      this.blockers.circles.push([x, z, r]);
       const p = new THREE.Group();
       p.position.set(x, 0, z);
       p.scale.setScalar(sc);
@@ -636,6 +775,7 @@ export class World {
         g.stroke();
       }
     });
+    for (const c of [TABLE, COOLER]) this.blockers.circles.push([c.x, c.z, c.r]);
     const roundRug = new THREE.Mesh(new THREE.CircleGeometry(1.7, 40), new THREE.MeshStandardMaterial({ map: roundTex, transparent: true, roughness: 1 }));
     roundRug.rotation.x = -Math.PI / 2;
     roundRug.position.set(TABLE.x, 0.012, TABLE.z);
@@ -659,9 +799,9 @@ export class World {
       [TABLE.x - 0.95, TABLE.z, Math.PI / 2],
       [TABLE.x, TABLE.z - 0.95, 0],
     ]) {
-      this.lounge.push({ kind: 'stand', pos: new THREE.Vector3(x, 0, z), yaw, node: 'TABLE', approach: x < TABLE.x - 0.5 ? [new THREE.Vector3(x, 0, TABLE.z - 1.15)] : [] });
+      this.lounge.push({ kind: 'stand', pos: new THREE.Vector3(x, 0, z), yaw, node: 'TABLE', approach: x < TABLE.x - 0.5 ? [new THREE.Vector3(x, 0, TABLE.z - 1.15)] : [], group: 'table' });
     }
-    this.lounge.push({ kind: 'stand', pos: new THREE.Vector3(COOLER.x, 0, COOLER.z - 0.7), yaw: 0, node: 'TABLE', approach: [] });
+    this.lounge.push({ kind: 'stand', pos: new THREE.Vector3(COOLER.x, 0, COOLER.z - 0.7), yaw: 0, node: 'TABLE', approach: [], group: 'table' });
   }
 
   private buildManager() {
@@ -669,6 +809,7 @@ export class World {
     const g = new THREE.Group();
     g.position.set(2.0, 0, 3.75);
     s.add(g);
+    this.blockers.boxes.push([2.0, 3.75, 1.12, 0.45]);
     const wood = std(0x6f4a2f, { roughness: 0.55 });
     const metal = std(C.charcoal, { roughness: 0.4, metalness: 0.2 });
     // big desk (worker side is +z, facing the office at -z)
@@ -754,6 +895,7 @@ export class World {
   }
 
   drawManagerScreen(lines: string[]) {
+    if (!this.manager) return;
     const c = this.manager.screen.g;
     c.fillStyle = '#1B1E24';
     c.fillRect(0, 0, 512, 320);
@@ -779,6 +921,29 @@ export class World {
     const n = this.nav;
     n.add('DOOR_OUT', this.doorOut.x, this.doorOut.z);
     n.add('DOOR_IN', this.doorIn.x, this.doorIn.z);
+    n.link('DOOR_OUT', 'DOOR_IN');
+    // through the arch to the room behind: down the corridor along the right wall
+    if (this.backRoom >= 0) {
+      const x = (BACK_ARCH.x0 + BACK_ARCH.x1) / 2;
+      n.add('ARCH_S', x, AISLE_Z);
+      n.add('ARCH_IN', x, -4.5);
+      n.add('ARCH_OUT', x, -5.6);
+      n.link('ARCH_S', 'ARCH_IN');
+      n.link('ARCH_IN', 'ARCH_OUT');
+    }
+    // out the front, through the gap in the hedge, into the yard
+    if (this.onYard) {
+      const x = (GATE.x0 + GATE.x1) / 2;
+      n.add('GATE_IN', x, 8.0);
+      n.add('GATE_OUT', x, 9.9);
+      n.link('GATE_IN', 'GATE_OUT');
+    }
+    if (this.isGame) {
+      this.game!.graph(n);
+      if (this.backRoom >= 0) n.link('ARCH_S', 'PONG');
+      if (this.onYard) n.link('GATE_IN', 'C');
+      return;
+    }
     n.add('LOUNGE', -4.9, 2.9);
     n.add('SIDE_S', -3.9, 2.9);
     n.add('SIDE_M', -3.9, AISLE_Z);
@@ -788,7 +953,6 @@ export class World {
     n.add('TABLE', -1.0, 5.85);
     DESK_X.forEach((x, i) => n.add(`A${i}`, x, AISLE_Z));
     n.link('SIDE_S', 'TABLE');
-    n.link('DOOR_OUT', 'DOOR_IN');
     n.link('DOOR_IN', 'LOUNGE');
     n.link('DOOR_IN', 'SIDE_S');
     n.link('LOUNGE', 'SIDE_S');
@@ -798,10 +962,12 @@ export class World {
     n.link('SIDE_S', 'FRONT_M');
     n.link('SIDE_M', 'A0');
     for (let i = 0; i < DESK_X.length - 1; i++) n.link(`A${i}`, `A${i + 1}`);
+    if (this.backRoom >= 0) n.link('ARCH_S', 'A3');
+    if (this.onYard) n.link('GATE_IN', 'TABLE');
   }
 
   /** An abstract emblem for the room's wall (no product logos). */
-  private emblem(group: THREE.Group, m: THREE.Material) {
+  emblem(group: THREE.Group, m: THREE.Material) {
     const e = this.theme.emblem;
     if (e === 'sparkle') {
       const a = new THREE.Mesh(new THREE.ExtrudeGeometry(sparkleShape(0.5, 0.09), { depth: 0.04, bevelEnabled: false }), m);
@@ -828,6 +994,36 @@ export class World {
       zs.lineTo(-0.4, 0.26);
       zs.closePath();
       group.add(new THREE.Mesh(new THREE.ExtrudeGeometry(zs, { depth: 0.06, bevelEnabled: false }), m));
+    } else if (e === 'pad') {
+      // a game controller
+      const pad = new THREE.Shape();
+      pad.moveTo(-0.3, 0.16);
+      pad.lineTo(0.3, 0.16);
+      pad.quadraticCurveTo(0.5, 0.16, 0.52, -0.08);
+      pad.quadraticCurveTo(0.54, -0.3, 0.38, -0.3);
+      pad.quadraticCurveTo(0.26, -0.3, 0.16, -0.1);
+      pad.lineTo(-0.16, -0.1);
+      pad.quadraticCurveTo(-0.26, -0.3, -0.38, -0.3);
+      pad.quadraticCurveTo(-0.54, -0.3, -0.52, -0.08);
+      pad.quadraticCurveTo(-0.5, 0.16, -0.3, 0.16);
+      group.add(new THREE.Mesh(new THREE.ExtrudeGeometry(pad, { depth: 0.06, bevelEnabled: false }), m));
+      const btn = new THREE.MeshStandardMaterial({ color: 0xfaf7f2, roughness: 0.5 });
+      for (const [x, y] of [
+        [0.3, 0.06],
+        [0.38, -0.02],
+        [0.22, -0.02],
+        [0.3, -0.1],
+      ]) {
+        const b = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.03, 10), btn);
+        b.rotation.x = Math.PI / 2;
+        b.position.set(x, y, 0.07);
+        group.add(b);
+      }
+      const dpadA = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.05, 0.03), btn);
+      dpadA.position.set(-0.3, -0.02, 0.07);
+      const dpadB = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.16, 0.03), btn);
+      dpadB.position.set(-0.3, -0.02, 0.07);
+      group.add(dpadA, dpadB);
     } else {
       for (const [x, y, r] of [
         [-0.18, 0.08, 0.26],
@@ -852,12 +1048,14 @@ export class World {
       move(d.steamAt);
       d.approach.forEach(move);
     }
-    for (const sp of [...this.lounge, ...this.boards, ...this.manager.visitors]) {
+    for (const sp of [...this.lounge, ...this.boards, ...(this.manager?.visitors ?? [])]) {
       move(sp.pos);
       sp.approach.forEach(move);
     }
-    move(this.manager.center);
-    move(this.manager.seat);
+    if (this.manager) {
+      move(this.manager.center);
+      move(this.manager.seat);
+    }
     move(this.doorIn);
     move(this.doorOut);
     move(this.coffeeSteam);
@@ -870,16 +1068,13 @@ export class World {
     return p.x >= o.x - 7.2 && p.x <= o.x + 7.2 && p.z >= o.z - 5 && p.z <= o.z + 9;
   }
 
-  /** The middle of the side door in the left wall. */
-  get doorPos() {
-    return this.origin.clone().add(new THREE.Vector3(-7, 1.2, 3.5));
-  }
 
   /** Things that move or get swapped at runtime: never merged into static geometry. */
   dynamicObjects(): THREE.Object3D[] {
     const list: THREE.Object3D[] = [this.door, this.logo, ...this.plants];
     for (const d of this.desks) list.push(d.chair, d.mug, d.glow, d.monitor);
-    list.push(this.manager.chair, this.manager.bell);
+    if (this.manager) list.push(this.manager.chair, this.manager.bell);
+    if (this.game) list.push(...this.game.dynamic);
     return list;
   }
 
@@ -902,7 +1097,7 @@ export class World {
     this.logo.scale.setScalar(1 + 0.03 * Math.sin(t * 1.2));
     this.logo.rotation.z = Math.sin(t * 0.1) * 0.08;
     // the bell bounces when rung
-    if (this.bellT >= 0) {
+    if (this.bellT >= 0 && this.manager) {
       this.bellT += dt;
       const k = Math.exp(-this.bellT * 6) * Math.sin(this.bellT * 40);
       this.manager.bell.scale.set(1 + 0.15 * k, 1 - 0.2 * Math.abs(k), 1 + 0.15 * k);
@@ -916,6 +1111,7 @@ export class World {
       p.rotation.z = 0.025 * Math.sin(t * 0.8 + i);
       p.rotation.x = 0.02 * Math.sin(t * 0.6 + i * 2);
     });
+    this.game?.update(dt, t, live);
     if (!live) return;
     for (const d of this.desks) {
       d.screen.update(dt);
@@ -931,6 +1127,7 @@ export class World {
   }
 
   private drawClock() {
+    if (!this.clock) return;
     const g = this.clock.g;
     const d = new Date();
     g.fillStyle = '#FAF7F2';
@@ -963,6 +1160,7 @@ export class World {
   }
 
   private drawWindow() {
+    if (!this.windowTex) return;
     const g = this.windowTex.g;
     const h = new Date().getHours() + new Date().getMinutes() / 60;
     const day = Math.max(0, Math.sin(((h - 6) / 12) * Math.PI)); // 0 at night, 1 at noon
@@ -1012,6 +1210,7 @@ export class World {
   }
 
   drawBoard(items: { name: string; text: string; color: string; done?: boolean }[]) {
+    if (!this.board) return;
     const g = this.board.g;
     g.fillStyle = '#FBFBF8';
     g.fillRect(0, 0, 512, 300);

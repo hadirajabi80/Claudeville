@@ -31,7 +31,7 @@ npm run hooks:uninstall
 
 ## Rooms
 
-Claudeville is a building of five square rooms on a grid: Claude, ChatGPT and Cursor on top, Z Code and Work below, with a small garden in the free corner. Neighbouring rooms share a wall with a doorway in it (a sign over each one names the room behind it), so you can simply walk from room to room. The tabs at the top jump straight to a room (each shows how many agents are inside), **🗺 All** shows the whole building at once, and in the overview a double-click on the floor glides the camera there.
+Claudeville is a building of six square rooms on a grid: Claude, ChatGPT and Cursor on top, Z Code, Work and the Game room below, with a yard out front. Only walls that face outside have windows; walls shared with another room carry a pinboard. Neighbouring rooms share a wall with a doorway in it (a sign over each one names the room behind it), so you can simply walk from room to room. The tabs at the top jump straight to a room (each shows how many agents are inside), **🗺 All** shows the whole building at once, and in the overview a double-click on the floor glides the camera there.
 
 | Room | Who works there |
 | --- | --- |
@@ -40,6 +40,9 @@ Claudeville is a building of five square rooms on a grid: Claude, ChatGPT and Cu
 | **Cursor** | Cursor agent chats |
 | **Z Code** | Z Code sessions |
 | **Work** | Mixed teams you build, where agents of different kinds work together |
+| **Game** | Nobody works here: agents on a break play on the console, at foosball, ping-pong or the arcade |
+
+Idle agents don't stay put: every minute or so they get up and go somewhere else for their break, often to the game room or out to the yard (pond, picnic table, fire pit), walking through the doorways like you do. When their session needs them again they walk back to their desk.
 
 How each agent is seen:
 

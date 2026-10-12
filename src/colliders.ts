@@ -1,7 +1,7 @@
 // Simple 2D (XZ) collision world for the player: boxes for furniture, circles for plants, chairs and agents,
 // and a set of walkable areas (every room's floor, the doorways between neighbouring rooms, and the garden).
 import * as THREE from 'three';
-import { BACK_ARCH, TABLE, COOLER, type World } from './world';
+import { BACK_ARCH, type World } from './world';
 
 export interface Box {
   x0: number;
@@ -22,7 +22,7 @@ interface Wall {
   to: number;
   gaps: [number, number][];
 }
-/** Extra walkable ground outside the rooms (the garden). */
+/** Extra walkable ground outside the rooms (the yard). */
 export interface Grounds {
   areas: Box[];
   boxes: Box[];
@@ -32,7 +32,7 @@ export interface Grounds {
 export class Colliders {
   boxes: Box[] = [];
   circles: Circle[] = [];
-  /** floors you can stand on: one per room (same order as the rooms), then doorways and the garden */
+  /** floors you can stand on: one per room (same order as the rooms), then doorways and the yard */
   areas: Box[] = [];
   private rooms: number;
   private walls: Wall[] = [];
@@ -42,14 +42,8 @@ export class Colliders {
     for (const w of worlds) {
       const ox = w.origin.x;
       const oz = w.origin.z;
-      for (const d of w.desks) box(d.center.x, d.center.z, 0.72, 0.37);
-      box(ox - 5.52, oz + 1.6, 0.45, 1.15); // couch incl. arms
-      box(ox - 4.45, oz + 1.6, 0.2, 0.47); // low table
-      box(ox - 6.62, oz - 3.2, 0.37, 0.87); // coffee counter
-      box(ox - 6.78, oz - 0.6, 0.2, 0.62); // bookshelf
-      box(w.manager.center.x, w.manager.center.z, 1.12, 0.45); // manager desk
-      for (const [x, z, , r] of w.plantSpots) this.circles.push({ x: ox + x, z: oz + z, r });
-      for (const c of [TABLE, COOLER]) this.circles.push({ x: ox + c.x, z: oz + c.z, r: c.r });
+      for (const [cx, cz, hx, hz] of w.blockers.boxes) box(ox + cx, oz + cz, hx, hz);
+      for (const [x, z, r] of w.blockers.circles) this.circles.push({ x: ox + x, z: oz + z, r });
       this.areas.push({ x0: ox - 6.8, x1: ox + 6.75, z0: oz - 4.78, z1: oz + 8.75 });
       // walls the camera stays inside: the back wall and the left wall, with their doorways
       this.walls.push({ axis: 'z', at: oz - 5.08, from: ox - 7.2, to: ox + 7, gaps: w.backRoom >= 0 ? [[ox + BACK_ARCH.x0, ox + BACK_ARCH.x1]] : [] });
@@ -70,7 +64,7 @@ export class Colliders {
     }
   }
 
-  /** Which room's floor (index) is this point on, or -1 for a doorway or the garden. */
+  /** Which room's floor (index) is this point on, or -1 for a doorway or the yard. */
   roomAt(p: THREE.Vector3): number {
     for (let i = 0; i < this.rooms; i++) {
       const a = this.areas[i];

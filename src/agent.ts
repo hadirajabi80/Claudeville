@@ -535,6 +535,17 @@ export class Agent {
           this.rig.mug.visible = prop === 'mug';
           this.rig.phone.visible = prop === 'phone';
           expr = 'happy';
+        } else if (spotKind === 'game' && this.seated) {
+          // the phone stands in for a controller
+          P.gaming(p, g, q);
+          this.rig.phone.visible = true;
+          expr = Math.sin(0.7 * g + q.seed * 5) > 0.8 ? 'laugh' : 'focus';
+        } else if (spotKind === 'play') {
+          P.foosball(p, g, q, this.spot?.group?.startsWith('arcade'));
+          expr = Math.sin(0.6 * g + q.seed * 4) > 0.75 ? 'laugh' : 'focus';
+        } else if (spotKind === 'pong') {
+          P.pong(p, g, q, (this.spot?.yaw ?? 0) > 0 ? 0 : 1);
+          expr = 'happy';
         } else if (spotKind === 'board') {
           P.whiteboard(p, g, q);
           expr = 'focus';
@@ -582,6 +593,10 @@ export class Agent {
     if (this.spot?.kind === 'couch') {
       P.couch(p, g, q, 'mug');
       return 'happy';
+    }
+    if (this.spot?.kind === 'game') {
+      P.gaming(p, g, q);
+      return 'focus';
     }
     if (this.spot?.kind === 'board') {
       P.whiteboard(p, g, q);

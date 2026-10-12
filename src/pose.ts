@@ -293,3 +293,56 @@ export function whiteboard(p: Pose, g: number, q: Quirks) {
   p.r.head[0] = -0.1;
   p.r.head[1] = 0.1 * Math.sin(TAU * 0.6 * g);
 }
+
+// ------------------------------------------------------------------ games (the game room)
+
+/** A ping-pong rally: the ball crosses the table in half this time (s). Poses and the ball share the clock. */
+export const PONG_PERIOD = 1.8;
+
+/** On the couch with a controller: thumbs busy, leaning into the turns. */
+export function gaming(p: Pose, g: number, q: Quirks) {
+  seatedBase(p, COUCH_LIFT, g, q);
+  leg(p, 'L', 1.45, 1.4, 0.08);
+  leg(p, 'R', 1.45, 1.4, 0.08);
+  const lean = Math.sin(0.9 * g + q.seed * 7) ** 3; // now and then a hard lean
+  const thumbs = 0.05 * Math.sin(TAU * 6 * g + q.seed);
+  p.r.spine[0] = 0.22;
+  p.r.spine[2] = 0.16 * lean;
+  arm(p, 'L', 0.75, -0.12, 1.75 + thumbs);
+  arm(p, 'R', 0.75, -0.12, 1.75 - thumbs);
+  p.r.head[0] = 0.08;
+  p.r.head[2] = 0.08 * lean;
+}
+
+/** Bent over a foosball table (or, `high`, at an arcade cabinet), hands on the controls, twisting in bursts. */
+export function foosball(p: Pose, g: number, q: Quirks, high = false) {
+  standIdle(p, g, q);
+  const burst = Math.max(0, Math.sin(1.3 * g + q.seed * 5));
+  const wig = 0.12 * burst * Math.sin(TAU * (2 + 3 * burst) * g);
+  p.r.spine[0] = high ? 0.06 : 0.3;
+  leg(p, 'L', 0.12, 0.22);
+  leg(p, 'R', -0.04, 0.1);
+  arm(p, 'L', (high ? 1.15 : 0.9) + wig, 0.2, high ? 1.0 : 0.5);
+  arm(p, 'R', (high ? 1.15 : 0.9) - wig, 0.2, high ? 1.0 : 0.5);
+  p.r.head[0] = high ? -0.05 : 0.28;
+  p.r.head[1] = 0.12 * Math.sin(0.8 * g + q.seed * 3);
+  p.r.hips[2] = 0.05 * Math.sin(TAU * 0.7 * g);
+}
+
+/** Ping-pong: ready stance, then a forehand each time the ball comes to your end (side 0 west, 1 east). */
+export function pong(p: Pose, g: number, q: Quirks, side: 0 | 1) {
+  standIdle(p, g, q);
+  const u = ((((g + side * (PONG_PERIOD / 2)) % PONG_PERIOD) + PONG_PERIOD) % PONG_PERIOD) / PONG_PERIOD; // 0 = hit
+  const d = u < 0.5 ? u : u - 1;
+  const swing = Math.exp(-(d * d) / 0.004); // a quick bell around the hit
+  const windup = Math.exp(-((d + 0.09) * (d + 0.09)) / 0.003);
+  leg(p, 'L', 0.25, 0.4, 0.1);
+  leg(p, 'R', 0.15, 0.4, 0.1);
+  p.lift = -0.04;
+  p.r.spine[0] = 0.2;
+  p.r.spine[1] = 0.35 * swing - 0.3 * windup;
+  arm(p, 'R', 0.5 + 0.9 * swing, 0.45 - 0.4 * swing + 0.2 * windup, 0.8 - 0.4 * swing);
+  arm(p, 'L', 0.45, 0.25, 1.2);
+  p.r.head[0] = 0.1;
+  p.r.head[1] = 0.25 * Math.sin(Math.PI * 2 * u) * (side ? -1 : 1);
+}

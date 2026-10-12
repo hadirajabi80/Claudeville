@@ -4,7 +4,8 @@ import { Agent, type Action } from './agent';
 import { variantFor } from './character';
 import { hex } from './palette';
 import { modelLabel, type Activity, type AskPayload, type SpawnOptions, type Stage } from './types';
-import { localOf, type Desk, type Spot, type World } from './world';
+import { localOf, isSeat, isBreak, GAME_ROOM, type Desk, type Spot, type World } from './world';
+import type { Campus } from './campus';
 import type { Effects } from './effects';
 import type { Sound } from './sound';
 import type { Emotes, EmoteKind } from './emotes';
@@ -50,6 +51,12 @@ export class Office implements Stage {
   private wasNearDoorRoom: boolean[] = [];
   /** your own character, when it walks around: doors open for you too */
   visitor: THREE.Vector3 | null = null;
+  /** the building-wide walk graph (set by main once the yard is built) */
+  campus!: Campus;
+  /** places outside an agent's own room for a break: the game room and the yard */
+  outings: Spot[] = [];
+  /** when each idle agent next gets up to go somewhere else (simulation seconds) */
+  private wanderAt = new Map<string, number>();
 
   /** The Claude room by default. */
   get world() {
@@ -176,7 +183,7 @@ export class Office implements Stage {
     const a = this.agents.get(id);
     if (!a) return;
     const t = this.target.get(id);
-    if (t && (t.kind === 'couch' || t.kind === 'stand') && !a.busyWorking) return;
+    if (t && isBreak(t.kind) && !a.busyWorking) return;
     a.setActivity(null);
     const spot = this.pickLounge(a);
     if (instant) return this.teleport(a, spot, 'rest');
@@ -379,7 +386,7 @@ export class Office implements Stage {
     };
     actions.push(walk);
     if (spot) {
-      if (spot.kind === 'desk' || spot.kind === 'couch') {
+      if (isSeat(spot.kind)) {
         actions.push({
           kind: 'sit',
           dur: 0.9,
@@ -391,7 +398,7 @@ export class Office implements Stage {
           },
         });
       } else {
-        actions.push({ kind: 'turn', dur: 0.35, toYaw: spot.yaw, onDone: () => spot.node === 'COFFEE' && this.sound.coffee(this.worldOf(a).coffeeSteam) });
+        actions.push({ kind: 'turn', dur: 0.35, toYaw: spot.yaw, onDone: () => spot.node === 'COFFEE' && this.sound.coffee(spot.pos.clone().setY(1.2)) });
       }
     }
     actions.push(...after);
@@ -438,11 +445,12 @@ export class Office implements Stage {
     if (from) {
       // retrace the old spot's approach back to the corridor
       const back = from.approach.slice(0, -1).reverse();
-      if (from.kind !== 'desk' && from.kind !== 'couch') back.length = 0;
+      if (!isSeat(from.kind)) back.length = 0;
       pts.push(...back.map((p) => p.clone()));
     }
     const startPos = pts.length ? pts[pts.length - 1] : a.position;
-    const path = this.worldOf(a).pathTo(startPos, spot, node);
+    // one graph for the whole building: agents walk through doorways to other rooms and the yard
+    const path = this.campus.pathTo(startPos, spot, node && `${a.room}:${node}`);
     // drop a first node that lies behind us (avoids walking back to a node we just passed)
     if (path.length > 1 && !from) {
       const d0 = startPos.distanceTo(path[0]);
@@ -451,13 +459,13 @@ export class Office implements Stage {
       if (d1 < d01 && d0 < d01) path.shift();
     }
     pts.push(...path);
-    if (spot && spot.kind !== 'desk' && spot.kind !== 'couch') pts.push(spot.pos.clone());
+    if (spot && !isSeat(spot.kind)) pts.push(spot.pos.clone());
     return pts;
   }
 
   private standPoint(s: Spot) {
     if (s.kind === 'desk') return (s as Desk).side;
-    if (s.kind === 'couch') return s.approach[0];
+    if (isSeat(s.kind)) return s.approach[s.approach.length - 1] ?? s.pos;
     return s.pos;
   }
 
@@ -467,7 +475,7 @@ export class Office implements Stage {
     a.spot = spot;
     this.target.set(a.id, spot);
     a.place(spot.pos, spot.yaw);
-    a.seated = spot.kind === 'desk' || spot.kind === 'couch';
+    a.seated = isSeat(spot.kind);
     a.plan([{ kind: then }]);
     this.resumeFn.set(a.id, () => this.moveTo(a, spot, [{ kind: then }], [], true));
     if (spot.kind === 'desk') this.arriveDesk(a, spot as Desk);
@@ -506,8 +514,20 @@ export class Office implements Stage {
     return w.boards.find(free) ?? w.lounge.find(free) ?? w.boards[0];
   }
 
-  private pickLounge(a: Agent): Spot {
-    const free = (s: Spot) => !s.occupant || s.occupant === a.id;
+  /** Somewhere for a break: usually the room's own lounge, sometimes the game room or the yard. */
+  private pickLounge(a: Agent, not?: Spot | null): Spot {
+    const free = (s: Spot) => s !== not && (!s.occupant || s.occupant === a.id);
+    if (Math.random() < 0.45) {
+      const outs = this.outings.filter(free);
+      // join a game (or a chat) someone already started
+      const weight = (s: Spot) => (s.group && this.outings.some((o) => o !== s && o.group === s.group && o.occupant && o.occupant !== a.id) ? 5 : 1);
+      const sum = outs.reduce((n, s) => n + weight(s), 0);
+      if (outs.length) {
+        let r = Math.random() * sum;
+        for (const s of outs) if ((r -= weight(s)) <= 0) return s;
+        return outs[outs.length - 1];
+      }
+    }
     const w = this.worldOf(a);
     const couches = w.lounge.filter((s) => s.kind === 'couch' && free(s));
     if (couches.length) return couches[Math.floor(Math.random() * couches.length)];
@@ -557,10 +577,12 @@ export class Office implements Stage {
     for (const a of this.agents.values()) {
       a.update(dt, g);
       const p = a.position;
-      const door = this.worldOf(a).doorPos;
-      if (Math.hypot(p.x - door.x, p.z - door.z) < 1.7 && a.walking) near[a.room] = true;
+      // agents now walk through other rooms too: any door they pass swings open
+      if (a.walking) this.worlds.forEach((w, i) => (near[i] ||= Math.hypot(p.x - w.doorPos.x, p.z - w.doorPos.z) < 1.7));
       if (a.busyWorking && a.seated && (a.activity?.kind === 'write' || a.activity?.kind === 'search')) typing++;
     }
+    this.wander(g);
+    this.updatePlay();
     this.worlds.forEach((w, i) => {
       const v = this.visitor;
       if (v && Math.hypot(v.x - w.doorPos.x, v.z - w.doorPos.z) < 1.9) near[i] = true;
@@ -601,6 +623,36 @@ export class Office implements Stage {
       }
     }
     void typing;
+  }
+
+  /** Idle agents don't sit in one place forever: every so often they get up and go somewhere else. */
+  private wander(g: number) {
+    for (const a of this.agents.values()) {
+      const t = this.target.get(a.id);
+      const idle = t && isBreak(t.kind) && a.state === 'rest' && !a.removed && !a.held && !a.notifying && !a.pendingAsk && !a.reaction;
+      if (!idle) {
+        this.wanderAt.delete(a.id);
+        continue;
+      }
+      const at = this.wanderAt.get(a.id);
+      if (at === undefined) this.wanderAt.set(a.id, g + 35 + Math.random() * 50);
+      else if (g > at) {
+        this.wanderAt.delete(a.id);
+        const next = this.pickLounge(a, t);
+        if (next !== t) this.moveTo(a, next, [{ kind: 'rest' }], [], true);
+      }
+    }
+  }
+
+  /** Tell the game room who is playing what, so its tables and screens come alive. */
+  private updatePlay() {
+    const game = this.worlds[GAME_ROOM]?.game;
+    if (!game) return;
+    game.players.clear();
+    for (const s of this.worlds[GAME_ROOM].lounge) {
+      const o = s.group && s.occupant ? this.agents.get(s.occupant) : undefined;
+      if (o && o.state === 'rest' && o.position.distanceTo(s.pos) < 0.35) game.players.set(s.group!, (game.players.get(s.group!) ?? 0) + 1);
+    }
   }
 
   boardItems(room = 0) {

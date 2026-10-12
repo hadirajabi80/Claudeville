@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import './style.css';
-import { World, ROOMS } from './world';
+import { World, ROOMS, GAME_ROOM } from './world';
+import { Campus } from './campus';
 import { buildGrounds, buildingBounds } from './building';
 import { Effects } from './effects';
 import { Office } from './office';
@@ -67,7 +68,7 @@ controls.update();
 const worlds = ROOMS.map((theme, i) => new World(scene, i, theme));
 const world = worlds[0];
 const WORK = 4;
-const grounds = buildGrounds(scene, worlds);
+const yard = buildGrounds(scene, worlds);
 // bake static furniture into a few big meshes (hundreds of draw calls → a few dozen)
 const merged = mergeStatic(scene, worlds.flatMap((w) => w.dynamicObjects()));
 for (const w of worlds) for (const d of w.desks) mergeStatic(d.chair, []);
@@ -77,6 +78,9 @@ trimShadowCasters(scene, 0.12);
 const fx = new Effects(scene);
 const sound = new Sound();
 const office = new Office(scene, worlds, fx, sound);
+// one walk graph for the whole building, and the places agents go for a break outside their own room
+office.campus = new Campus(worlds, yard);
+office.outings = [...yard.spots, ...worlds[GAME_ROOM].lounge];
 const director = new Director(office);
 const hud = new Hud();
 const demo = new Demo((e) => ingest(e, true));
@@ -139,7 +143,7 @@ tease.onToolChange = (t) => {
 tease.setTool('hand');
 
 // ------------------------------------------------------------------ your own character
-const colliders = new Colliders(worlds, grounds);
+const colliders = new Colliders(worlds, yard.grounds);
 const player = new Player(scene, colliders, office, sound, fx, renderer.domElement);
 trimShadowCasters(player.agent.rig.root);
 const social = new Social(office, player, tease);
@@ -205,7 +209,8 @@ dispatch.onOpenChange = (open) => {
 player.onStandUp = () => dispatch.close();
 const roomWorld = () => worlds[activeRoom] ?? world;
 function nearManagerChair() {
-  return player.spawned && player.mode !== 'orbit' && !player.seat && player.position.distanceTo(roomWorld().manager.seat) < 1.5;
+  const m = roomWorld().manager; // the game room has no manager desk
+  return !!m && player.spawned && player.mode !== 'orbit' && !player.seat && player.position.distanceTo(m.seat) < 1.5;
 }
 const savedLook = savedAvatar();
 if (savedLook) player.setLook(savedLook.gender, savedLook.name);
@@ -432,7 +437,7 @@ const roomHome = (i: number) => {
 const BUILDING = buildingBounds();
 const overviewHome = () => {
   const target = BUILDING.center.clone().setY(0.5).add(new THREE.Vector3(0, 0, 1));
-  return { pos: target.clone().add(new THREE.Vector3(4, 41, 31)), target };
+  return { pos: target.clone().add(new THREE.Vector3(4, 46, 34)), target };
 };
 const roomTabs = document.getElementById('rooms')!;
 const allBtn = document.createElement('button');
@@ -548,6 +553,7 @@ function simulate() {
     elapsed -= dt;
     g += dt;
     office.update(dt, g);
+    yard.update(dt, g);
     // a bug in a cosmetic layer must never freeze the live office
     try {
       player.update(dt, g, camera);
@@ -593,9 +599,12 @@ function frame(dt: number) {
     hud.renderPanel([...office.agents.values()], director.stats());
     chat.refresh();
     worlds.forEach((w, i) => w.drawBoard(office.boardItems(i)));
-    // how many agents are in each room
+    // how many agents are in each room right now (wherever they wandered off to)
     const counts = worlds.map(() => 0);
-    for (const a of office.agents.values()) if (!a.removed) counts[a.room]++;
+    for (const a of office.agents.values()) {
+      const r = a.removed ? -1 : worlds.findIndex((w) => w.contains(a.position));
+      if (r >= 0) counts[r]++;
+    }
     roomTabs.querySelectorAll<HTMLElement>('button[data-room]').forEach((b, i) => (b.querySelector('.n')!.textContent = counts[i] ? String(counts[i]) : ''));
   }
 
@@ -678,7 +687,12 @@ function frame(dt: number) {
   }
   renderer.render(scene, camera);
   camera.position.sub(shake);
-  const tagged = [...office.agents.values()].filter((a) => a.room === activeRoom);
+  // name tags for whoever is in the room you are looking at (and, out in the yard, whoever is near)
+  const here = worlds[activeRoom];
+  const focus = player.spawned && player.mode !== 'orbit' ? player.position : controls.target;
+  const tagged = [...office.agents.values()].filter(
+    (a) => here.contains(a.position) || (!worlds.some((w) => w.contains(a.position)) && a.position.distanceTo(focus) < 14),
+  );
   if (player.spawned && player.mode !== 'first') tagged.push(player.agent);
   hud.update(tagged, camera, innerWidth, innerHeight);
 }
