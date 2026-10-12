@@ -2,7 +2,8 @@
 // Hook relay: forwards the hook JSON (stdin) to Claudeville.
 // Used by Claude Code (default) and by Cursor (`--source=cursor`).
 // It never blocks or changes the agent's behavior: it exits 0 and prints nothing, except for
-// Cursor's beforeSubmitPrompt, which needs an explicit "continue" answer.
+// Cursor's beforeSubmitPrompt, which needs an explicit "continue" answer, and a stop you asked for
+// in the office (■ next to a session): then, before its next tool call, it tells Claude Code to end the turn.
 // Uses node:http directly (not fetch) so proxy environment variables never reroute localhost.
 import http from 'node:http';
 
@@ -44,8 +45,18 @@ process.stdin.on('end', () => {
       timeout: 1500,
     },
     (res) => {
-      res.resume();
-      res.on('end', done);
+      let out = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => (out += c));
+      res.on('end', () => {
+        try {
+          const j = out ? JSON.parse(out) : null;
+          if (j && j.continue === false) process.stdout.write(JSON.stringify(j));
+        } catch {
+          /* not a decision */
+        }
+        done();
+      });
     },
   );
   req.on('error', done); // office not running: ignore

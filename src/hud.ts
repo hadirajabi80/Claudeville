@@ -39,6 +39,12 @@ export class Hud {
   onFollow?: (id: string | null) => void;
   onTalk?: (id: string) => void;
   onAnswer?: (id: string) => void;
+  /** ■ next to a working session (pressed twice: once to arm, once to confirm) */
+  onStop?: (id: string) => void;
+  /** the session whose ■ was pressed once and waits for the confirming click, and until when */
+  private armed: { id: string; until: number } | null = null;
+  /** sessions asked to stop, shown as "stopping…" until they do */
+  stopping = new Set<string>();
   talkableId: string | null = null;
   followId: string | null = null;
 
@@ -89,15 +95,42 @@ export class Hud {
         this.onTalk?.(b.dataset.talk!);
       };
     });
+    this.sessionsEl.querySelectorAll<HTMLButtonElement>('[data-stop]').forEach((b) => {
+      b.onclick = (e) => {
+        e.stopPropagation();
+        const id = b.dataset.stop!;
+        if (this.armed?.id === id && this.armed.until > performance.now()) {
+          this.armed = null;
+          this.stopping.add(id);
+          this.onStop?.(id);
+        } else {
+          // first press only arms it: a stray click never stops anyone's work
+          this.armed = { id, until: performance.now() + 4000 };
+          setTimeout(() => this.armed?.id === id && this.armed.until <= performance.now() && this.renderAgain?.(), 4100);
+        }
+        this.renderAgain?.();
+      };
+    });
   }
+
+  /** set by main: redraw the session list now (after arming / disarming a stop button) */
+  renderAgain?: () => void;
 
   private rowHtml(a: Agent, sub: boolean) {
     const state = a.pendingAsk ? 'asking' : a.notifying ? 'waiting' : a.busyWorking || (a.state === 'sit' && a.spot?.kind === 'desk') ? 'working' : a.walking ? 'walking' : a.state === 'celebrate' ? 'done!' : 'break';
+    if (this.stopping.has(a.id) && state !== 'working' && state !== 'asking') this.stopping.delete(a.id);
+    const armed = this.armed?.id === a.id && this.armed.until > performance.now();
+    const canStop = !sub && (state === 'working' || state === 'asking' || state === 'waiting');
+    const stopBtn = !canStop
+      ? ''
+      : this.stopping.has(a.id)
+        ? '<span class="stopping" title="It stops before its next step">stopping…</span>'
+        : `<button class="talk stop${armed ? ' armed' : ''}" data-stop="${a.id}" title="${armed ? 'Click again to stop ' + esc(a.name) + '’s task' : 'Stop this task'}">${armed ? 'Stop?' : '■'}</button>`;
     const doing = a.activity && a.busyWorking ? esc(verb(a.activity)) : '';
     return `<div class="sess ${sub ? 'sub' : ''} ${this.followId === a.id ? 'followed' : ''}" data-id="${a.id}">
       <i style="background:${hex(a.rig.accent)}"></i>
       <div class="who"><b>${sub ? '↳ ' : ''}${esc(a.name)}</b>${a.model ? ` <span class="mdl">${esc(a.model)}</span>` : ''} <small>${esc(a.subtitle)}</small><div class="doing">${doing}</div></div>
-      <span class="chip ${state}">${state}</span>${a.pendingAsk ? `<button class="talk ans" data-ans="${a.id}" title="Answer ${esc(a.name)}’s question">❓</button>` : ''}<button class="talk" data-talk="${a.id}" title="Chat with ${esc(a.name)}">💬</button></div>`;
+      <span class="chip ${state}">${state}</span>${a.pendingAsk ? `<button class="talk ans" data-ans="${a.id}" title="Answer ${esc(a.name)}’s question">❓</button>` : ''}${stopBtn}<button class="talk" data-talk="${a.id}" title="Chat with ${esc(a.name)}">💬</button></div>`;
   }
 
   follow(id: string | null) {

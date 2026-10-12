@@ -105,6 +105,10 @@ In third person, drag to look around and scroll to zoom. In first person, click 
 
 Everything is synthesized in the browser with 3D positional audio, so you hear each sound from where it happens: footsteps on wood and rug, keyboards clacking at busy desks, little babbling voices when agents talk, the door, the coffee machine, birds outside, celebrations, and a gentle lo-fi soundtrack. Sound starts on your first click or key press. Use 🔊 to mute and 🎵 (or M) for the music.
 
+## Stopping a session
+
+Every working session in the list on the left has a **■** button: press it, then **Stop?** to confirm. Tasks started from Claudeville (Dispatch and Team) end at once. Any other Claude Code session (in the terminal or the desktop app) stops before its next step: the relay hook, which waits for Claudeville's reply on `PreToolUse` (a few milliseconds; it returns at once when Claudeville isn't running), tells Claude Code to skip that tool and end the turn. The session itself stays open, and your next prompt runs normally. Re-run `npm run hooks:install` after updating so the hook can wait for the reply.
+
 ## Questions from agents
 
 When an agent or a subagent needs you, a multiple-choice question or a permission prompt such as "can I run `npm test`?", it raises its hand and shows the question above its head with a pulsing ❓. Walk over and press **E**, or click the ❓ above its head or in the session list, and answer in the card: pick an option (or type your own), or Allow / Deny a permission. The answer goes straight back to Claude Code.
@@ -129,7 +133,11 @@ Write a request for the team, pick the project folder and press **🚀 Send to t
 
 Mix agents freely, for example a Claude Team Lead on Fable who plans and reviews, a Cursor frontend engineer and a Codex backend engineer who implement. The lead knows which agent and model each member is when it plans. A member whose agent is not installed or signed in on this PC is flagged in the panel, and its task fails with a plain explanation instead of stalling the team.
 
-Every member is a character with the name you gave them, working in the Work room: they walk to a desk when their task starts, report at the manager desk when it is done and wait in the lounge for the next job. The work is coordinated by the server, so it keeps going if you reload or close the page; **■ Stop** stops the whole team.
+Every member is a character with the name you gave them, working in the Work room: they walk to a desk when their task starts, report at the manager desk when it is done and wait in the lounge for the next job. The work is coordinated by the server, so it keeps going if you reload or close the page.
+
+- **💬 Chat** on a task (or on the lead's planning and review) opens that member's live conversation: what they say, the files they read and edit, the commands they run and what came back, and their final report. Dispatched tasks have the same button.
+- **■** on a running task stops just that member; the rest of the team carries on. **■ Stop** stops the whole team, and while the team works a bar at the top keeps that button within reach even with the panel closed.
+- The model list shows every model each agent can use on this PC: for Claude, the models your gateway offers (read from its model list) or the Claude family when Claude Code is signed in directly; for Codex its own model list; for Cursor its `agent models` list once signed in. Models that can't run here are listed greyed out, with the reason.
 
 ## Your character and the team
 

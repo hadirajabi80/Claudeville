@@ -1695,8 +1695,8 @@ body.dispatching .helpbox {
 /* ------------------------------------------------------------ rooms */
 #rooms {
   position: fixed;
-  top: 16px;
-  left: 50%;
+  top: var(--rooms-top, 16px); /* moved below the buttons by main.ts when they would overlap */
+  left: var(--rooms-left, 50%); /* and right of the session panel */
   translate: -50% 0;
   display: flex;
   gap: 4px;
@@ -1708,6 +1708,7 @@ body.dispatching .helpbox {
   z-index: 20;
 }
 #rooms button {
+  white-space: nowrap;
   border: 0;
   background: transparent;
   border-radius: 9px;
@@ -1738,11 +1739,6 @@ body.dispatching .helpbox {
   border-radius: 999px;
   font-size: 10px;
   padding: 0 5px;
-}
-@media (max-width: 1100px) {
-  #rooms {
-    top: 64px;
-  }
 }
 
 #team .agentnote {
@@ -1777,4 +1773,210 @@ body.dispatching .helpbox {
 #dispatch .task .agent {
   font-size: 11px;
   margin-right: 2px;
+}
+
+/* ------------------------------------------------------------ a run's live conversation */
+#runchat {
+  position: fixed;
+  left: 16px;
+  top: 66px;
+  bottom: 90px;
+  width: 420px;
+  max-width: calc(100vw - 32px);
+  display: flex;
+  flex-direction: column;
+  background: rgba(250, 247, 242, 0.97);
+  backdrop-filter: blur(10px);
+  border-radius: 14px;
+  box-shadow: 0 8px 28px rgba(60, 40, 20, 0.2);
+  opacity: 0;
+  translate: -24px 0;
+  pointer-events: none;
+  transition: opacity 0.18s, translate 0.18s;
+  z-index: 31;
+}
+#runchat.open {
+  opacity: 1;
+  translate: 0 0;
+  pointer-events: auto;
+}
+#runchat header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(43, 43, 46, 0.08);
+}
+#runchat header .who {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+#runchat header b {
+  font: 600 15px Georgia, serif;
+}
+#runchat header small {
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#runchat header button {
+  border: 0;
+  background: none;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+}
+#runchat header .stop {
+  background: #2b2b2e;
+  color: #fff;
+  border-radius: 8px;
+  padding: 4px 9px;
+  font-size: 12px;
+}
+#runchat .convo {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font: 12.5px/1.45 ui-sans-serif, 'Segoe UI', sans-serif;
+}
+#runchat .convo .empty {
+  color: var(--muted);
+  text-align: center;
+  margin-top: 30px;
+}
+#runchat .ln {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+#runchat .ln.say {
+  background: #fff;
+  border: 1px solid rgba(43, 43, 46, 0.08);
+  border-radius: 10px 10px 10px 3px;
+  padding: 7px 10px;
+  color: #2b2b2e;
+}
+#runchat .ln.tool {
+  font: 12px ui-monospace, Consolas, monospace;
+  color: #4b5563;
+  padding-left: 4px;
+}
+#runchat .ln.out {
+  font: 11px/1.35 ui-monospace, Consolas, monospace;
+  color: #8a8278;
+  background: rgba(43, 43, 46, 0.04);
+  border-radius: 6px;
+  padding: 5px 8px;
+  max-height: 120px;
+  overflow: hidden;
+}
+#runchat .ln.info {
+  color: var(--muted);
+  font-size: 11.5px;
+  text-align: center;
+}
+#runchat .ln.error {
+  color: #b42318;
+  background: rgba(180, 35, 24, 0.06);
+  border-radius: 8px;
+  padding: 6px 9px;
+}
+
+/* chat and stop buttons on team and dispatch tasks */
+#team .chatbtn,
+#dispatch .chatbtn,
+#team .stopone {
+  border: 1px solid rgba(43, 43, 46, 0.12);
+  background: #fff;
+  border-radius: 7px;
+  padding: 2px 7px;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+#team .chatbtn:hover,
+#dispatch .chatbtn:hover {
+  border-color: var(--orange);
+}
+#team .stopone {
+  background: #2b2b2e;
+  color: #fff;
+}
+#team .leadrun {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  padding: 4px 2px;
+}
+#team .leadrun small {
+  color: var(--muted);
+  flex: 1;
+}
+
+/* the team at work, while its panel is closed */
+#teambar {
+  position: fixed;
+  top: var(--teambar-top, 64px); /* just under the room tabs (set by main.ts) */
+  left: 50%;
+  translate: -50% 0;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+  background: rgba(43, 43, 46, 0.92);
+  color: #f3ede3;
+  border-radius: 999px;
+  font: 12.5px ui-sans-serif, 'Segoe UI', sans-serif;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+  cursor: pointer;
+  z-index: 21;
+}
+#teambar.show {
+  display: flex;
+}
+#teambar .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #39d353;
+  animation: teampulse 1.2s infinite;
+}
+@keyframes teampulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+#teambar .stop {
+  border: 0;
+  background: #d94a4a;
+  color: #fff;
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* ■ stop next to a working session (click once to arm, again to stop) */
+.sess .talk.stop {
+  font-size: 11px;
+  color: #2b2b2e;
+}
+.sess .talk.stop.armed {
+  opacity: 1;
+  background: #d94a4a;
+  color: #fff;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-weight: 600;
+}
+.sess .stopping {
+  font-size: 11px;
+  color: #b42318;
+  white-space: nowrap;
 }

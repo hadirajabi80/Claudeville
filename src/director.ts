@@ -108,7 +108,17 @@ export class Director {
         break;
       case 'RunDone': {
         const charId = e.runId ? this.runChars.get(e.runId) : undefined;
-        if (!charId) break;
+        if (!charId) {
+          // a run the page no longer knows (e.g. after a reload, its events replayed as a plain session):
+          // once it has ended, its character must not stay behind looking busy
+          const ghost = this.leads.get(e.session);
+          if (ghost && !ghost.run) {
+            for (const s of [...this.subs.values()]) if (s.session === e.session) this.finishSub(s, false);
+            this.stage.leave(ghost.id, false, true);
+            this.leads.delete(e.session);
+          }
+          break;
+        }
         this.runChars.delete(e.runId!);
         for (const [sid, l] of this.leads) if (l.id === charId) this.leads.delete(sid);
         if (!this.instant) this.stage.report(charId, !!e.ok, e.detail ?? '');
@@ -183,6 +193,12 @@ export class Director {
       const unboundDone = sub.launchDoneAt && !sub.bound && now - sub.launchDoneAt > UNBOUND_GRACE_MS && sub.last <= sub.launchDoneAt;
       if (unboundDone || now - sub.last > SUB_IDLE_MS) this.finishSub(sub, true);
     }
+  }
+
+  /** The Claude Code session (and office run, if it is one) behind a lead character. */
+  sessionOf(charId: string): { session: string; run?: string } | undefined {
+    for (const l of this.leads.values()) if (l.id === charId) return { session: l.session, run: l.run };
+    return undefined;
   }
 
   /** Claude Code agent_id behind a subagent character (for chat context). */

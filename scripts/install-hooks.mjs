@@ -14,7 +14,8 @@ const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
 const uninstall = process.argv.includes('--uninstall');
 
 const TOOL_EVENTS = ['PreToolUse', 'PostToolUse', 'PostToolUseFailure'];
-// fire-and-forget activity events (async: they never slow Claude down)
+// activity events: fire-and-forget (async: they never slow Claude down), except PreToolUse, which waits for
+// the office's reply (a few milliseconds) so that ■ Stop in the office can end a session's turn
 const EVENTS = [
   'SessionStart',
   'SessionEnd',
@@ -44,7 +45,7 @@ for (const ev of new Set([...EVENTS, ...ASK_HOOKS.map((a) => a.event)])) {
   const list = (settings.hooks[ev] ?? []).filter((e) => !isOurs(e));
   if (!uninstall) {
     if (EVENTS.includes(ev)) {
-      const entry = { hooks: [{ type: 'command', command: `node "${relay}"`, async: true, timeout: 5 }] };
+      const entry = { hooks: [{ type: 'command', command: `node "${relay}"`, async: ev !== 'PreToolUse', timeout: 5 }] };
       if (TOOL_EVENTS.includes(ev)) entry.matcher = '*';
       list.push(entry);
     }

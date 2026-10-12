@@ -24,6 +24,7 @@ import { Dispatch } from './dispatch';
 import { APP_NAME, APP_TAGLINE } from './brand';
 import { AnswerCard } from './answer';
 import { Team } from './team';
+import { RunChat } from './runchat';
 
 document.title = APP_NAME;
 document.getElementById('appname')!.textContent = APP_NAME;
@@ -45,7 +46,7 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xf6eee2);
 scene.fog = new THREE.Fog(0xf6eee2, 24, 42);
 
-const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 100);
+const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 300);
 // the view of one room, relative to its origin (rooms are 14 x 14: x -7..7, z -5..9)
 const HOME_TARGET = new THREE.Vector3(-0.3, 0.5, 1.4);
 const HOME_POS = HOME_TARGET.clone().add(new THREE.Vector3(4.6, 9.6, 12.6));
@@ -55,7 +56,7 @@ controls.target.copy(HOME_TARGET);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.minDistance = 4;
-controls.maxDistance = 64;
+controls.maxDistance = 120;
 controls.minPolarAngle = 0.3;
 controls.maxPolarAngle = 1.3;
 controls.minAzimuthAngle = -1.2;
@@ -156,6 +157,10 @@ const picker = new AvatarPicker();
 const dispatch = new Dispatch(office, director, worlds, sound);
 const answerCard = new AnswerCard();
 const team = new Team(office, director, worlds[WORK], sound);
+// any run's live conversation (opened from a team task or a dispatched task)
+const runChat = new RunChat();
+team.runChat = runChat;
+dispatch.runChat = runChat;
 document.getElementById('teamBtn')!.onclick = () => {
   // teams meet in the Work room
   if (!team.isOpen && activeRoom !== WORK) goToRoom(WORK);
@@ -177,7 +182,10 @@ hud.onAnswer = (id) => {
   answerCard.open(a);
 };
 let askHintUntil = 0;
+/** true while past events are replayed on load: old (long answered) questions must not pop a hint */
+let replaying = false;
 office.onAsk = (a) => {
+  if (replaying) return;
   askHintUntil = performance.now() + 8000;
   askHintText = `${a.name} has a question: walk over and press E${player.mode === 'orbit' ? ' (or click the ❓)' : ''}`;
 };
@@ -226,6 +234,29 @@ document.getElementById('who')!.onclick = async () => {
 };
 const chat = new Chat(office, player, sound, camera);
 chat.agentIdOf = (id) => director.agentIdOf(id);
+// ■ next to a session in the list: tasks started here end at once, other sessions stop before their next step
+hud.onStop = async (id) => {
+  const a = office.agents.get(id);
+  const info = director.sessionOf(id);
+  const runId = info?.run ?? (id.startsWith('run:') ? id.slice(4) : undefined);
+  let j: { ok?: boolean; how?: string; error?: string } = {};
+  try {
+    const res = await fetch('/api/session/stop', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-agent-office': '1' },
+      body: JSON.stringify({ session: info?.session, runId }),
+    });
+    j = await res.json();
+  } catch {
+    j = { ok: false, error: 'Claudeville server not reachable' };
+  }
+  if (!j.ok) {
+    hud.stopping.delete(id);
+    a?.say(`Can’t stop: ${j.error ?? 'unknown session'}`, 'say', 3);
+  } else a?.say(j.how === 'run' ? 'Stopping now ✋' : 'OK, stopping after this step ✋', 'say', 3);
+  panelDirty = true;
+};
+hud.renderAgain = () => hud.renderPanel([...office.agents.values()], director.stats());
 hud.onTalk = (id) => {
   const a = office.agents.get(id);
   if (a) chat.open(a);
@@ -305,6 +336,10 @@ addEventListener('keydown', (e) => {
   const tag = (e.target as HTMLElement)?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || e.repeat) return;
   const k = e.key.toLowerCase();
+  if (k === 'escape' && runChat.isOpen) {
+    runChat.close();
+    return;
+  }
   if (k === 'escape' && chat.isOpen) {
     chat.close();
     return;
@@ -379,7 +414,12 @@ function connect() {
   es.addEventListener('replay', (m) => {
     const events = JSON.parse((m as MessageEvent).data) as OfficeEvent[];
     team.restore(events); // members still working keep their names and looks
-    director.replay(events);
+    replaying = true;
+    try {
+      director.replay(events);
+    } finally {
+      replaying = false;
+    }
     // questions older than the replay window are still waiting: put those raised hands back too
     fetch('/api/asks', { headers: { 'x-agent-office': '1' } })
       .then((r) => r.json())
@@ -442,7 +482,9 @@ const roomHome = (i: number) => {
 const BUILDING = buildingBounds();
 const overviewHome = () => {
   const target = BUILDING.center.clone().setY(0.5).add(new THREE.Vector3(0, 0, 1));
-  return { pos: target.clone().add(new THREE.Vector3(4, 46, 34)), target };
+  // narrow (portrait) windows need to stand further back to fit the building's width
+  const fit = Math.max(1, 1.45 / camera.aspect);
+  return { pos: target.clone().add(new THREE.Vector3(4, 46, 34).multiplyScalar(fit)), target };
 };
 const roomTabs = document.getElementById('rooms')!;
 const allBtn = document.createElement('button');
@@ -536,7 +578,37 @@ addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+  layoutTopBars();
 });
+
+/**
+ * The room tabs sit in the top row between the session panel and the buttons; when the window is too narrow
+ * for that (they would cover the buttons), they drop to a row of their own just below. The team bar goes under them.
+ */
+function layoutTopBars() {
+  const root = document.documentElement.style;
+  root.setProperty('--rooms-top', '16px');
+  root.setProperty('--rooms-left', '50%');
+  const tabs = roomTabs.getBoundingClientRect();
+  const hit = (el: Element | null) => {
+    const r = el?.getBoundingClientRect();
+    return !!r && r.width > 0 && tabs.left < r.right + 8 && tabs.right > r.left - 8 && tabs.top < r.bottom && tabs.bottom > r.top;
+  };
+  const buttons = document.querySelector('.controls');
+  if (hit(buttons)) {
+    root.setProperty('--rooms-top', `${Math.round((buttons?.getBoundingClientRect().bottom ?? 56) + 8)}px`);
+  }
+  // and clear of the session panel on the left
+  const now = roomTabs.getBoundingClientRect();
+  const panel = document.getElementById('panel')?.getBoundingClientRect();
+  if (panel && panel.width > 0 && now.left < panel.right + 8 && now.top < panel.bottom) {
+    const center = Math.min(panel.right + 8 + now.width / 2, innerWidth - now.width / 2 - 8);
+    root.setProperty('--rooms-left', `${Math.round(center)}px`);
+  }
+  root.setProperty('--teambar-top', `${Math.round(roomTabs.getBoundingClientRect().bottom + 8)}px`);
+}
+requestAnimationFrame(layoutTopBars);
+document.fonts?.ready.then(layoutTopBars);
 
 // ------------------------------------------------------------------ loop
 let last = performance.now();
@@ -611,6 +683,7 @@ function frame(dt: number) {
       if (r >= 0) counts[r]++;
     }
     roomTabs.querySelectorAll<HTMLElement>('button[data-room]').forEach((b, i) => (b.querySelector('.n')!.textContent = counts[i] ? String(counts[i]) : ''));
+    layoutTopBars(); // the counts change the tabs' width
   }
 
   if (hud.followId) {

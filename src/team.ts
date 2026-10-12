@@ -9,6 +9,7 @@ import type { OfficeEvent } from './types';
 import type { Gender } from './character';
 import { randomName } from './names';
 import { hex } from './palette';
+import { fillModelSelect, type ModelOption, type RunChat } from './runchat';
 
 type Perm = 'readonly' | 'edit' | 'auto';
 
@@ -61,6 +62,8 @@ interface AgentStatus {
   available: boolean;
   hint: string;
   models: string[];
+  /** every model this agent can use here (and the ones it can't, with the reason) */
+  options?: ModelOption[];
 }
 const PERMS: [Perm, string][] = [
   ['readonly', 'Read only'],
@@ -103,6 +106,9 @@ interface TeamState {
   plan: string;
   summary: string;
   tasks: Task[];
+  /** the lead's planning and review runs (their conversations can be opened) */
+  planRun?: string;
+  reviewRun?: string;
 }
 
 const KEY = 'office-team';
@@ -115,6 +121,9 @@ export class Team {
   private state: TeamState | null = null;
   private agentStatus: Partial<Record<AgentKind, AgentStatus>> = {};
   private tick = 0;
+  private bar = document.getElementById('teambar')!;
+  /** the chat panel that shows a run's live conversation (set by main) */
+  runChat?: RunChat;
   onOpenChange?: (open: boolean) => void;
 
   constructor(
@@ -135,6 +144,12 @@ export class Team {
       if (e.key === 'Escape') this.close();
     });
     this.el.addEventListener('keyup', (e) => e.stopPropagation());
+    // the status bar shows while the team works and the panel is closed
+    this.bar.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement;
+      if (t.closest('.stop')) this.stop();
+      else this.open();
+    });
     this.renderAll();
   }
 
@@ -155,6 +170,7 @@ export class Team {
     clearInterval(this.tick);
     this.tick = window.setInterval(() => this.busy && this.renderProgress(), 1000);
     this.onOpenChange?.(true);
+    this.renderBar();
   }
 
   close() {
@@ -163,6 +179,7 @@ export class Team {
     clearInterval(this.tick);
     (document.activeElement as HTMLElement)?.blur?.();
     this.onOpenChange?.(false);
+    this.renderBar();
   }
 
   toggle() {
@@ -236,8 +253,7 @@ export class Team {
     set('gender', m?.gender ?? 'm');
     set('name', m?.name ?? '');
     set('agent', m?.agent ?? 'claude');
-    this.syncModels(m?.agent ?? 'claude');
-    set('model', m?.model ?? 'default');
+    this.syncModels(m?.agent ?? 'claude', m?.model ?? 'default');
     set('skills', (m?.skills ?? ROLES[role].skills).join(', '));
     set('perm', m?.perm ?? ROLES[role].perm);
     (f.querySelector('.addbtn') as HTMLButtonElement).textContent = m ? 'Save changes' : '+ Add to team';
@@ -313,8 +329,16 @@ export class Team {
     this.renderProgress();
   }
 
+  /** Stop the whole team: the lead's run and every running task. */
   private async stop() {
     await this.api('/api/team/stop', {});
+    this.fetchState();
+  }
+
+  /** Stop one member's task; the rest of the team carries on. */
+  private async stopTask(runId: string) {
+    await this.api('/api/run/stop', { runId });
+    this.fetchState();
   }
 
   // ------------------------------------------------------------------ rendering
@@ -324,17 +348,17 @@ export class Team {
     if (!j.ok) return;
     this.agentStatus = j.agents;
     const form = this.el.querySelector<HTMLFormElement>('form.add');
-    if (form) this.syncModels((form.elements.namedItem('agent') as HTMLSelectElement).value as AgentKind);
+    if (form) this.syncModels((form.elements.namedItem('agent') as HTMLSelectElement).value as AgentKind, (form.elements.namedItem('model') as HTMLSelectElement).value);
     this.renderMembers();
   }
 
-  /** Model suggestions and a status note for the chosen agent. */
-  private syncModels(agent: AgentKind) {
-    const dl = this.el.querySelector('#team-models');
+  /** Every model the chosen agent can use (a real list, not a filtered suggestion box) and a status note. */
+  private syncModels(agent: AgentKind, want: string) {
+    const sel = this.el.querySelector<HTMLSelectElement>('form.add select[name="model"]');
     const note = this.el.querySelector('.agentnote');
     const st = this.agentStatus[agent];
-    const models = st?.models ?? (agent === 'claude' ? MODELS.map((m) => m[0]) : ['default']);
-    if (dl) dl.innerHTML = models.map((m) => `<option value="${esc(m)}">${esc(agent === 'claude' ? modelName(m) : m)}</option>`).join('');
+    const fallback: ModelOption[] = agent === 'claude' ? MODELS.map(([id, label]) => ({ id, label, ok: true })) : [{ id: 'default', label: 'Default', ok: true }];
+    if (sel) fillModelSelect(sel, st?.options ?? fallback, want);
     if (note) note.textContent = st ? (st.available ? `${AGENTS[agent].label} is ready on this PC.` : `⚠ ${st.hint}`) : '';
     note?.classList.toggle('bad', !!st && !st.available);
   }
@@ -367,8 +391,7 @@ export class Team {
             .map((l) => `<option>${l}</option>`)
             .join('')}</select></div>
           <div class="row"><select name="gender"><option value="m">Male</option><option value="f">Female</option></select><input name="name" placeholder="Name (random if empty)" maxlength="16" /><button type="button" class="dice" title="Random name">🎲</button></div>
-          <div class="row"><select name="agent">${(Object.keys(AGENTS) as AgentKind[]).map((k) => `<option value="${k}">${AGENTS[k].icon} ${AGENTS[k].label}</option>`).join('')}</select><input name="model" list="team-models" placeholder="Model (default)" /></div>
-          <datalist id="team-models"></datalist>
+          <div class="row"><select name="agent">${(Object.keys(AGENTS) as AgentKind[]).map((k) => `<option value="${k}">${AGENTS[k].icon} ${AGENTS[k].label}</option>`).join('')}</select><select name="model" title="Model"></select></div>
           <div class="agentnote"></div>
           <div class="row"><select name="perm">${PERMS.map(([k, n]) => `<option value="${k}">${n}</option>`).join('')}</select></div>
           <input name="skills" placeholder="Skills, comma separated" />
@@ -391,10 +414,14 @@ export class Team {
     };
     const form = this.el.querySelector<HTMLFormElement>('form.add')!;
     const agentSel = form.elements.namedItem('agent') as HTMLSelectElement;
-    agentSel.onchange = () => {
-      this.syncModels(agentSel.value as AgentKind);
-      (form.elements.namedItem('model') as HTMLInputElement).value = 'default';
-    };
+    agentSel.onchange = () => this.syncModels(agentSel.value as AgentKind, 'default');
+    // chat and stop buttons on the progress list (it is redrawn every second while the team works)
+    this.el.querySelector('.progress')!.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-chat], [data-stop]');
+      if (!b) return;
+      if (b.dataset.stop) this.stopTask(b.dataset.stop);
+      else this.runChat?.open(b.dataset.chat!, b.dataset.title ?? 'Agent', b.dataset.sub ?? '');
+    });
     const roleSel = form.elements.namedItem('role') as HTMLSelectElement;
     roleSel.onchange = () => {
       const r = ROLES[roleSel.value];
@@ -456,11 +483,24 @@ export class Team {
     }
   }
 
+  /** The "team is working" bar at the top: visible while the team works and its panel is closed. */
+  private renderBar() {
+    const st = this.state;
+    const show = this.busy && !this.isOpen && !!st;
+    this.bar.classList.toggle('show', show);
+    if (!show || !st) return;
+    const done = st.tasks.filter((t) => t.status !== 'waiting' && t.status !== 'running').length;
+    const what = st.stage === 'planning' ? 'planning' : st.stage === 'reviewing' ? 'reviewing' : `working · ${done}/${st.tasks.length} tasks done`;
+    this.bar.innerHTML = `<span class="dot"></span><b>👥 Team</b> ${what}<button class="stop" title="Stop the whole team">■ Stop</button>`;
+    this.bar.title = 'Open the team panel';
+  }
+
   private renderProgress() {
     const box = this.el.querySelector('.progress');
     if (!box) return;
     (this.el.querySelector('.go') as HTMLButtonElement).disabled = this.busy;
     (this.el.querySelector('.stop') as HTMLElement).style.display = this.busy ? '' : 'none';
+    this.renderBar();
     const st = this.state;
     if (!st || st.stage === 'idle') {
       box.innerHTML = '';
@@ -477,6 +517,9 @@ export class Team {
     };
     const now = Date.now();
     let html = `<div class="stage">${stageText[st.stage]}</div><div class="plan">“${esc(st.request)}”</div>`;
+    const lead = st.members.find((m) => m.role === 'lead');
+    const chatBtn = (runId: string, title: string, sub: string) => `<button class="chatbtn" data-chat="${esc(runId)}" data-title="${esc(title)}" data-sub="${esc(sub)}" title="Read the conversation">💬 Chat</button>`;
+    if (st.planRun && lead) html += `<div class="leadrun">🧭 <b>${esc(lead.name)}</b> <small>plans the work</small>${chatBtn(st.planRun, lead.name, 'Team Lead · planning')}</div>`;
     if (st.plan) html += `<div class="plan">Plan: ${esc(st.plan)}</div>`;
     const phases = [...new Set(st.tasks.map((t) => t.phase))];
     for (const p of phases) {
@@ -485,9 +528,12 @@ export class Team {
         const m = this.memberOf(t.memberId);
         const r = m ? ROLES[m.role] : undefined;
         const secs = t.startedAt ? Math.round(((t.endedAt ?? now) - t.startedAt) / 1000) : 0;
-        html += `<div class="task ${t.status}"><div class="top">${r?.icon ?? '👤'} <b>${esc(m?.name ?? '?')}</b> <small>${r?.title ?? ''}</small><span class="chip ${t.status}">${t.status}</span>${secs ? `<span class="time">${secs}s</span>` : ''}</div><div class="what">${esc(t.task)}</div>${t.result ? `<details><summary>Report</summary><div class="result" dir="auto">${esc(t.result)}</div></details>` : ''}</div>`;
+        const sub = `${r?.title ?? ''} · ${AGENTS[m?.agent ?? 'claude'].label} · ${modelName(m?.model ?? 'default')}`;
+        const btns = (t.runId ? chatBtn(t.runId, m?.name ?? 'Agent', sub) : '') + (t.status === 'running' && t.runId ? `<button class="stopone" data-stop="${esc(t.runId)}" title="Stop this task (the rest of the team carries on)">■</button>` : '');
+        html += `<div class="task ${t.status}"><div class="top">${r?.icon ?? '👤'} <b>${esc(m?.name ?? '?')}</b> <small>${r?.title ?? ''}</small><span class="chip ${t.status}">${t.status}</span>${secs ? `<span class="time">${secs}s</span>` : ''}${btns}</div><div class="what">${esc(t.task)}</div>${t.result ? `<details><summary>Report</summary><div class="result" dir="auto">${esc(t.result)}</div></details>` : ''}</div>`;
       }
     }
+    if (st.reviewRun && lead) html += `<div class="leadrun">🔍 <b>${esc(lead.name)}</b> <small>reviews the work</small>${chatBtn(st.reviewRun, lead.name, 'Team Lead · review')}</div>`;
     if (st.summary) html += `<div class="summary"><b>Team lead’s summary</b><div dir="auto">${esc(st.summary)}</div></div>`;
     box.innerHTML = html;
     // mirror on the manager's monitor

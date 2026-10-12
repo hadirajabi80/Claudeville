@@ -46,6 +46,9 @@ export interface TeamState {
   endedAt?: number;
   /** run id of the lead's current planning / review run (so it can be stopped) */
   leadRun?: string;
+  /** the lead's planning and review runs, kept so their conversations can be read afterwards */
+  planRun?: string;
+  reviewRun?: string;
 }
 
 const ROLE_TITLE: Record<string, string> = {
@@ -159,7 +162,8 @@ async function runTeam(s: TeamState, broadcast: (raw: Record<string, unknown>) =
       'Answer with ONLY a JSON object, no other text, in this shape:',
       '{"summary":"one sentence describing the plan","phases":[[{"member":"<id>","task":"<clear, specific task>"}]]}',
     ].join('\n');
-    s.leadRun = newRun();
+    s.leadRun = s.planRun = newRun();
+    push();
     const r = await run(lead, prompt, 'readonly', s.leadRun);
     s.leadRun = undefined;
     if (stopRequested) return finish(s, 'stopped', push);
@@ -201,7 +205,8 @@ async function runTeam(s: TeamState, broadcast: (raw: Record<string, unknown>) =
           t.startedAt = Date.now();
           push();
           const r = await run(m, prompt, m.perm, t.runId);
-          t.status = stopRequested ? 'stopped' : r.ok ? 'done' : 'failed';
+          // one task can be stopped on its own; the rest of the team carries on
+          t.status = stopRequested || r.stopped ? 'stopped' : r.ok ? 'done' : 'failed';
           t.result = r.text;
           t.endedAt = Date.now();
           push();
@@ -229,7 +234,8 @@ async function runTeam(s: TeamState, broadcast: (raw: Record<string, unknown>) =
       'Review the work against the request: read TEAM_NOTES.md and the files the team changed (you can read but not change files).',
       'Then write the final summary for your manager: what was done and by whom, whether the request is fully met, and any open issues or next steps. Keep it under 150 words.',
     ].join('\n');
-    s.leadRun = newRun();
+    s.leadRun = s.reviewRun = newRun();
+    push();
     const r = await run(reviewer, prompt, 'readonly', s.leadRun);
     s.leadRun = undefined;
     s.summary = r.text;

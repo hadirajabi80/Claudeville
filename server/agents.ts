@@ -3,6 +3,7 @@
 //   codex   -> `codex exec`                    (bundled with the Codex app, or on PATH)
 //   cursor  -> `cursor-agent -p`               (Cursor's CLI, if installed)
 //   zcode   -> `zcode --prompt`                (Z Code's CLI, if installed)
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -153,4 +154,98 @@ export function buildRunner(
   // zcode: headless runs default to auto-approve ("yolo"); pick an explicit mode instead
   const args = ['--prompt', instruction, '--mode', r.permission === 'readonly' ? 'plan' : r.permission === 'auto' ? 'build' : 'edit'];
   return { cmd: shell ? q(exe) : exe, args: shell ? args.map(q) : args, shell, parse: done('zcode') };
+}
+
+// ------------------------------------------------------------------ model lists for the pickers
+
+/** A model in a picker: `ok` false means it is listed but can't run here, with `note` saying why. */
+export interface ModelOption {
+  id: string;
+  label: string;
+  ok: boolean;
+  note?: string;
+}
+
+const CLAUDE_FAMILY: [string, string][] = [
+  ['opus', 'Opus 5.5'],
+  ['sonnet', 'Sonnet 5.5'],
+  ['haiku', 'Haiku 4.5'],
+  ['fable', 'Fable 5.1'],
+];
+
+/** Claude Code's gateway settings, if it talks to one (never returned to the page). */
+function claudeGateway(): { base: string; token: string } | null {
+  let env: Record<string, string> = {};
+  try {
+    env = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', 'settings.json'), 'utf8')).env ?? {};
+  } catch {
+    /* no settings */
+  }
+  const base = (env.ANTHROPIC_BASE_URL ?? process.env.ANTHROPIC_BASE_URL ?? '').replace(/\/+$/, '');
+  const token = env.ANTHROPIC_AUTH_TOKEN ?? env.ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_AUTH_TOKEN ?? process.env.ANTHROPIC_API_KEY ?? '';
+  if (!base || /(^|\.)anthropic\.com$/i.test(new URL(base).host) || !token) return null;
+  return { base, token };
+}
+
+/** The models a gateway offers (its /v1/models list). */
+async function gatewayModels(g: { base: string; token: string }): Promise<string[] | null> {
+  try {
+    const r = await fetch(`${g.base}/v1/models?limit=200`, {
+      headers: { 'x-api-key': g.token, authorization: `Bearer ${g.token}`, 'anthropic-version': '2023-06-01' },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!r.ok) return null;
+    const j: any = await r.json();
+    return (j.data ?? j.models ?? []).map((m: any) => String(m.id ?? m.name ?? m)).filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
+/** Cursor's own model list (needs Cursor's CLI to be signed in). */
+function cursorModels(exe: string | null): Promise<string[] | null> {
+  if (!exe) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const shell = /\.(cmd|bat)$/i.test(exe);
+    execFile(shell ? `"${exe}"` : exe, ['models'], { timeout: 20000, shell, windowsHide: true }, (err, out) => {
+      if (err) return resolve(null);
+      const ids = String(out)
+        .split('\n')
+        .map((l) => l.trim().split(/\s+/)[0]?.replace(/^[-*•]\s*/, ''))
+        .filter((s) => s && /^[\w.:\[\]-]+$/.test(s) && !/^(available|models?|id)$/i.test(s));
+      resolve(ids.length ? ids : null);
+    });
+  });
+}
+
+let modelCache: { at: number; value: Record<AgentKind, ModelOption[]> } | null = null;
+
+/** Every model each agent can use on this PC, for the team and dispatch pickers (cached for a few minutes). */
+export async function agentModels(claudeDefault: string | null): Promise<Record<AgentKind, ModelOption[]>> {
+  if (modelCache && Date.now() - modelCache.at < 5 * 60_000) return modelCache.value;
+  const def = (name: string | null): ModelOption => ({ id: 'default', label: name ? `Default (${name})` : 'Default', ok: true });
+
+  // Claude: through a gateway only what it offers can run; signed in directly, the Claude family
+  const gw = claudeGateway();
+  const offered = gw ? await gatewayModels(gw) : null;
+  const claude: ModelOption[] = [def(claudeDefault)];
+  if (gw) {
+    const host = new URL(gw.base).host;
+    for (const id of offered ?? []) claude.push({ id, label: id, ok: true, note: `from ${host}` });
+    for (const [id, label] of CLAUDE_FAMILY) {
+      const full = offered?.find((m) => m.startsWith(`claude-${id}`));
+      if (!full) claude.push({ id, label, ok: false, note: `not offered by ${host}` });
+    }
+  } else for (const [id, label] of CLAUDE_FAMILY) claude.push({ id, label, ok: true });
+
+  const codex: ModelOption[] = codexModels().map((id) => (id === 'default' ? def(null) : { id, label: id, ok: true }));
+  const fromCursor = await cursorModels(cursorPath());
+  const cursor: ModelOption[] = fromCursor
+    ? [def(null), ...fromCursor.map((id) => ({ id, label: id, ok: true }))]
+    : [def(null), { id: 'auto', label: 'auto', ok: true }, ...['gpt-5', 'sonnet-4', 'sonnet-4-thinking'].map((id) => ({ id, label: id, ok: true, note: 'sign in to Cursor (agent login) to see your models' }))];
+  const zcode: ModelOption[] = [def(null)];
+
+  const value = { claude, codex, cursor, zcode };
+  modelCache = { at: Date.now(), value };
+  return value;
 }

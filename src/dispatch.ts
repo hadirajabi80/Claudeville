@@ -9,6 +9,7 @@ import type { OfficeEvent } from './types';
 import { hex } from './palette';
 import { modelLabel } from './types';
 import { AGENTS, type AgentKind } from './team';
+import { fillModelSelect, type ModelOption, type RunChat } from './runchat';
 
 /** which agent each room's manager desk calls (the Work room uses the team table instead) */
 const ROOM_AGENT: AgentKind[] = ['claude', 'codex', 'cursor', 'zcode'];
@@ -51,9 +52,11 @@ export class Dispatch {
   private unavailable = new Set<string>();
   /** the room whose desk the panel belongs to */
   private room = 0;
-  /** chosen model per non-Claude agent (free text: each has its own model names) */
+  /** chosen model per agent */
   private otherModels: Partial<Record<AgentKind, string>> = {};
-  private agentStatus: Partial<Record<AgentKind, { available: boolean; hint: string; models: string[] }>> = {};
+  private agentStatus: Partial<Record<AgentKind, { available: boolean; hint: string; models: string[]; options?: ModelOption[] }>> = {};
+  /** the chat panel that shows a run's live conversation (set by main) */
+  runChat?: RunChat;
   onOpenChange?: (open: boolean) => void;
 
   constructor(
@@ -76,8 +79,7 @@ export class Dispatch {
       <header><b class="ttl">🗂️ Dispatch</b><small>Give an agent a real task</small><button class="x" title="Close (Esc)">✕</button></header>
       <div class="body">
         <label>Model</label>
-        <div class="models">${MODELS.map((m) => `<button data-m="${m.key}" title="${m.hint}">${m.label}</button>`).join('')}</div>
-        <div class="other"><input class="omodel" list="dispatch-models" placeholder="Model (default)" spellcheck="false" /><datalist id="dispatch-models"></datalist><div class="agentnote"></div></div>
+        <div class="other"><select class="msel" title="Every model this agent can use here"></select><div class="agentnote"></div></div>
         <label>Project folder</label>
         <select class="proj"></select>
         <input class="path" placeholder="…or paste a folder path, e.g. C:\\Projects\\my-app" spellcheck="false" />
@@ -94,7 +96,6 @@ export class Dispatch {
         <div class="list"></div>
       </div>`;
     this.el.querySelector('.x')!.addEventListener('click', () => this.close());
-    this.el.querySelectorAll<HTMLButtonElement>('[data-m]').forEach((b) => (b.onclick = () => this.setModel(b.dataset.m!)));
     this.el.querySelectorAll<HTMLButtonElement>('[data-p]').forEach((b) => (b.onclick = () => this.setPerm(b.dataset.p as 'edit' | 'auto')));
     const sel = this.el.querySelector<HTMLSelectElement>('.proj')!;
     sel.onchange = () => {
@@ -103,9 +104,9 @@ export class Dispatch {
       this.save();
     };
     this.el.querySelector<HTMLButtonElement>('.go')!.onclick = () => this.call();
-    const om = this.el.querySelector<HTMLInputElement>('.omodel')!;
-    om.onchange = () => {
-      this.otherModels[this.agent] = om.value.trim() || 'default';
+    const ms = this.el.querySelector<HTMLSelectElement>('.msel')!;
+    ms.onchange = () => {
+      this.otherModels[this.agent] = ms.value || 'default';
       this.save();
     };
     // typing here must never move the player or fire hotkeys
@@ -117,7 +118,8 @@ export class Dispatch {
       });
       f.addEventListener('keyup', (e) => e.stopPropagation());
     }
-    this.setModel(this.model);
+    // older versions kept Claude's model separately (and defaulted to Sonnet, which a gateway may refuse)
+    if (!this.otherModels.claude && this.model !== 'sonnet') this.otherModels.claude = this.model;
     this.setPerm(this.permission);
   }
 
@@ -139,10 +141,7 @@ export class Dispatch {
     const ag = AGENTS[this.agent];
     const claude = this.agent === 'claude';
     this.el.querySelector('.ttl')!.textContent = claude ? '🗂️ Dispatch' : `🗂️ Dispatch · ${ag.label}`;
-    this.el.querySelector<HTMLElement>('.models')!.style.display = claude ? '' : 'none';
-    this.el.querySelector<HTMLElement>('.other')!.style.display = claude ? 'none' : '';
     this.el.querySelector<HTMLButtonElement>('.go')!.textContent = claude ? '🔔 Call an agent' : `🔔 Call a ${ag.label} agent`;
-    this.el.querySelector<HTMLInputElement>('.omodel')!.value = this.otherModels[this.agent] ?? 'default';
     this.syncAgent();
   }
 
@@ -153,11 +152,12 @@ export class Dispatch {
     this.syncAgent();
   }
 
-  /** Model suggestions and a readiness note for the room's agent. */
+  /** Every model the room's agent can use, and a readiness note. */
   private syncAgent() {
     const st = this.agentStatus[this.agent];
-    const dl = this.el.querySelector('#dispatch-models')!;
-    dl.innerHTML = (st?.models ?? ['default']).map((m) => `<option value="${esc(m)}"></option>`).join('');
+    const fallback: ModelOption[] = this.agent === 'claude' ? MODELS.map((m) => ({ id: m.key, label: m.label, ok: !this.unavailable.has(m.key) })) : [{ id: 'default', label: 'Default', ok: true }];
+    const sel = this.el.querySelector<HTMLSelectElement>('.msel')!;
+    this.otherModels[this.agent] = fillModelSelect(sel, st?.options ?? fallback, this.otherModels[this.agent] ?? 'default');
     const note = this.el.querySelector('.other .agentnote')!;
     note.textContent = st ? (st.available ? `${AGENTS[this.agent].label} is ready on this PC.` : `⚠ ${st.hint}`) : '';
     note.classList.toggle('bad', !!st && !st.available);
@@ -168,7 +168,6 @@ export class Dispatch {
     this.el.classList.add('open');
     document.body.classList.add('dispatching');
     this.loadProjects();
-    this.loadDefaultModel();
     this.loadAgents();
     this.render();
     setTimeout(() => this.el.querySelector<HTMLTextAreaElement>('.task')!.focus(), 30);
@@ -199,12 +198,6 @@ export class Dispatch {
     }
   }
 
-  private setModel(m: string) {
-    this.model = MODELS.some((x) => x.key === m) ? m : 'sonnet';
-    this.el.querySelectorAll<HTMLButtonElement>('[data-m]').forEach((b) => b.classList.toggle('on', b.dataset.m === this.model));
-    this.save();
-  }
-
   private setPerm(p: 'edit' | 'auto') {
     this.permission = p;
     this.el.querySelectorAll<HTMLButtonElement>('[data-p]').forEach((b) => b.classList.toggle('on', b.dataset.p === p));
@@ -218,24 +211,6 @@ export class Dispatch {
       body: body ? JSON.stringify(body) : undefined,
     });
     return res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }));
-  }
-
-  private async loadDefaultModel() {
-    const j = await this.api('/api/models');
-    const b = this.el.querySelector<HTMLButtonElement>('[data-m="default"]');
-    if (j.ok && j.default && b) {
-      b.textContent = `Default · ${modelLabel(j.default)}`;
-      LABEL.default = modelLabel(j.default);
-    }
-    this.markUnavailable();
-  }
-
-  private markUnavailable() {
-    this.el.querySelectorAll<HTMLButtonElement>('[data-m]').forEach((b) => {
-      const na = this.unavailable.has(b.dataset.m!);
-      b.classList.toggle('na', na);
-      b.title = na ? 'Your API key cannot use this model' : (MODELS.find((m) => m.key === b.dataset.m)?.hint ?? '');
-    });
   }
 
   private async loadProjects() {
@@ -271,14 +246,11 @@ export class Dispatch {
     const agentKind = this.agent;
     const room = this.room;
     const claude = agentKind === 'claude';
-    const om = (this.el.querySelector<HTMLInputElement>('.omodel')!.value.trim() || 'default').slice(0, 60);
-    if (!claude) {
-      this.otherModels[agentKind] = om;
-      this.save();
-    }
-    const model = claude ? this.model : om;
+    const model = (this.el.querySelector<HTMLSelectElement>('.msel')!.value || 'default').slice(0, 80);
+    this.otherModels[agentKind] = model;
+    this.save();
     // the label over their head: the model, or the agent's name when it uses its default
-    const label = claude ? LABEL[this.model] : om !== 'default' ? om : AGENTS[agentKind].label;
+    const label = model === 'default' ? (claude ? '' : AGENTS[agentKind].label) : claude ? (LABEL[model] ?? modelLabel(model)) : model;
     this.world.ringBell();
     this.sound.bell(this.world.manager.center.clone().setY(0.9));
 
@@ -342,9 +314,9 @@ export class Dispatch {
     const key = entry.agent === 'claude' ? MODELS.find((m) => m.label === entry.model)?.key : undefined;
     if (key && key !== 'default') {
       this.unavailable.add(key);
+      if (this.otherModels.claude === key) this.otherModels.claude = 'default';
       this.save();
-      this.markUnavailable();
-      if (this.model === key) this.setModel('default');
+      this.syncAgent();
     }
     const allowed = /models=\[([^\]]*)\]/.exec(r)?.[1]?.replace(/'/g, '');
     entry.result = `Your API key can’t use ${entry.model}${allowed ? ` (it allows: ${allowed})` : ''}. Pick another model, such as Default.`;
@@ -391,6 +363,15 @@ export class Dispatch {
           <span class="chip ${e.status}">${e.status}</span><span class="time">${time}</span></div>
         <div class="what" title="${esc(e.task)}">${esc(e.task)}</div>
         <div class="where">📁 ${esc(e.project)}</div>`;
+      if (e.status !== 'coming') {
+        // the agent's live conversation
+        const c = document.createElement('button');
+        c.className = 'chatbtn';
+        c.textContent = '💬 Chat';
+        c.title = 'Read the conversation';
+        c.onclick = () => this.runChat?.open(e.runId, e.name, `${AGENTS[e.agent].label} · ${e.model}`);
+        div.querySelector('.top')!.appendChild(c);
+      }
       if (e.status === 'running' || e.status === 'coming') {
         const b = document.createElement('button');
         b.className = 'stop';

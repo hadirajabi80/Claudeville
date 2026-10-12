@@ -4,7 +4,7 @@ import type { Plugin, Connect } from 'vite';
 import type { ServerResponse, IncomingMessage } from 'node:http';
 import path from 'node:path';
 import { handleChat, type SessionInfo } from './chat';
-import { handleRuns, runForSession } from './runs';
+import { handleRuns, runForSession, runningRunForSession, stopRun } from './runs';
 import { handleTeam } from './team';
 import { watchCodex, watchZcode, fromCursor } from './sources';
 import { handleAsk, handleAnswer, markVisible, pendingAsks, type AskPayload } from './asks';
@@ -42,6 +42,12 @@ const buffer: OfficeEvent[] = [];
 const clients = new Set<ServerResponse>();
 let nextId = 1;
 const sessions = new Map<string, SessionInfo>();
+/**
+ * Sessions you asked to stop (■ in the office), until when. Their next tool call is answered with
+ * "continue: false", which makes Claude Code end the turn; a new prompt from you clears it.
+ */
+const stopping = new Map<string, number>();
+const STOP_WINDOW = 5 * 60_000;
 const sessionModel = new Map<string, string>();
 const subModel = new Map<string, string>();
 const lastModelCheck = new Map<string, number>();
@@ -217,11 +223,67 @@ const middleware: Connect.NextHandleFunction = async (req, res, next) => {
       }
       remember(raw);
       broadcast({ ...normalize(raw), ...modelFor(raw) });
+      const sid = String(raw.session_id ?? '');
+      if (raw.hook_event_name === 'UserPromptSubmit') stopping.delete(sid); // a new turn: you want it to run
+      const until = stopping.get(sid);
+      if (raw.hook_event_name === 'PreToolUse' && until) {
+        if (until < Date.now()) stopping.delete(sid);
+        else {
+          // the relay hook prints this, and Claude Code ends the turn instead of running the tool
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'application/json');
+          // (deny the tool too: "continue: false" alone still lets this one tool run first)
+          res.end(
+            JSON.stringify({
+              continue: false,
+              stopReason: 'Stopped from Claudeville.',
+              hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'Stopped from Claudeville.' },
+            }),
+          );
+          if (!raw.agent_id) {
+            stopping.delete(sid);
+            broadcast({ ...normalize({ hook_event_name: 'Stop', session_id: sid, cwd: raw.cwd }), detail: 'Stopped from Claudeville' });
+          }
+          return;
+        }
+      }
       res.statusCode = 204;
     } catch {
       res.statusCode = 400;
     }
     res.end();
+    return;
+  }
+  if (url.startsWith('/api/session/stop') && req.method === 'POST') {
+    // ■ next to a session: office runs are ended at once; other sessions stop at their next step
+    const origin = req.headers.origin;
+    if (req.headers['x-agent-office'] !== '1' || (origin && req.headers.host && new URL(origin).host !== req.headers.host)) {
+      res.statusCode = 403;
+      res.end();
+      return;
+    }
+    let q: any = {};
+    try {
+      q = JSON.parse((await readBody(req)) || '{}');
+    } catch {
+      /* empty */
+    }
+    const session = String(q.session ?? '');
+    const runId = String(q.runId ?? '') || runningRunForSession(session);
+    const relay = (r: Record<string, unknown>) => broadcast({ ...normalize(r), ...modelFor(r) });
+    res.setHeader('Content-Type', 'application/json');
+    if (runId) {
+      stopRun(runId, relay);
+      res.end(JSON.stringify({ ok: true, how: 'run' }));
+      return;
+    }
+    if (!session || !sessions.has(session)) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ ok: false, error: 'unknown session' }));
+      return;
+    }
+    stopping.set(session, Date.now() + STOP_WINDOW);
+    res.end(JSON.stringify({ ok: true, how: 'next-step' }));
     return;
   }
   if (url.startsWith('/api/projects') || url.startsWith('/api/models') || url.startsWith('/api/agents') || url.startsWith('/api/runs') || url.startsWith('/api/run')) {

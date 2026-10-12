@@ -5,7 +5,8 @@ import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { buildRunner, detectAgents, type AgentKind } from './agents';
+import { buildRunner, detectAgents, agentModels, type AgentKind } from './agents';
+import { RunLog, claudeLine, codexLine } from './runlog';
 
 export interface Run {
   runId: string;
@@ -26,6 +27,8 @@ export interface Run {
   child?: ChildProcess;
   /** called once when the run ends (done, failed or stopped) */
   onDone?: (ok: boolean, text: string) => void;
+  /** the live conversation, for the chat panel */
+  log: RunLog;
 }
 
 const runs = new Map<string, Run>();
@@ -45,6 +48,11 @@ const MODEL_IDS: Record<string, string | undefined> = {
   fable: 'claude-fable-5-1',
   default: undefined,
 };
+/** A model name as given (alias or full id, e.g. glm-5.3 from a gateway), or 'default' if it looks wrong. */
+const cleanModel = (m: unknown) => {
+  const s = String(m ?? 'default').trim().slice(0, 80);
+  return /^[\w.:/\[\]-]+$/.test(s) ? s : 'default';
+};
 
 /** The model Claude Code uses when none is given (from env or ~/.claude/settings.json; never reads secrets). */
 function defaultModel(): string | null {
@@ -58,7 +66,7 @@ function defaultModel(): string | null {
 }
 
 function publicRun(r: Run) {
-  const { child: _c, ...rest } = r;
+  const { child: _c, log: _l, onDone: _d, ...rest } = r;
   return rest;
 }
 
@@ -95,12 +103,14 @@ function runEnv(runId: string): NodeJS.ProcessEnv {
 
 function startRun(r: Run, broadcast: (raw: Record<string, unknown>) => void) {
   if (r.agent && r.agent !== 'claude') return startOther(r, broadcast);
-  const args = ['-p', '--output-format', 'json'];
+  // stream the conversation as it happens, so the page can show it live
+  const args = ['-p', '--output-format', 'stream-json', '--verbose'];
   // read-only runs (team planning and review) can look at the code but never change it
   if (r.permission === 'readonly') args.push('--tools', 'Read', 'Grep', 'Glob');
   else args.push('--permission-mode', r.permission === 'auto' ? 'auto' : 'acceptEdits');
-  const id = MODEL_IDS[r.model];
+  const id = r.model in MODEL_IDS ? MODEL_IDS[r.model] : r.model;
   if (id) args.push('--model', id);
+  r.log.add('info', `Claude · ${r.model === 'default' ? 'default model' : r.model} · ${r.permission === 'readonly' ? 'read only' : r.permission === 'auto' ? 'edit + run commands' : 'edit files'}`);
   const child = spawn('claude', args, {
     cwd: r.project,
     env: runEnv(r.runId),
@@ -108,10 +118,18 @@ function startRun(r: Run, broadcast: (raw: Record<string, unknown>) => void) {
     windowsHide: true,
   });
   r.child = child;
-  let out = '';
   let err = '';
-  child.stdout?.on('data', (c) => (out += c));
-  child.stderr?.on('data', (c) => (err += c));
+  let partial = '';
+  let final: ReturnType<typeof claudeLine>;
+  child.stdout?.on('data', (c) => {
+    const lines = (partial + String(c)).split('\n');
+    partial = lines.pop() ?? '';
+    for (const l of lines) final = claudeLine(l, r.log, (sid) => (r.session = sid)) ?? final;
+  });
+  child.stderr?.on('data', (c) => {
+    err += String(c);
+    if (err.length > 100_000) err = err.slice(-50_000);
+  });
   const finish = (ok: boolean, text: string) => {
     if (r.status !== 'running') return;
     r.status = ok ? 'done' : 'failed';
@@ -121,19 +139,20 @@ function startRun(r: Run, broadcast: (raw: Record<string, unknown>) => void) {
     broadcast({ hook_event_name: 'RunDone', session_id: r.session ?? 'run:' + r.runId, office_run: r.runId, ok, summary: text, cwd: r.project });
     r.onDone?.(ok, text);
   };
-  child.on('error', (e) => finish(false, `Could not start the claude CLI: ${e.message}`));
+  child.on('error', (e) => {
+    r.log.add('error', `Could not start the claude CLI: ${e.message}`);
+    finish(false, `Could not start the claude CLI: ${e.message}`);
+  });
   child.on('close', () => {
     if (r.status === 'stopped') return;
-    const last = out.trim().split('\n').pop() ?? '';
-    try {
-      const j = JSON.parse(last);
-      if (j.session_id) r.session = j.session_id;
-      if (typeof j.total_cost_usd === 'number') r.cost = j.total_cost_usd;
-      const text = String(j.result ?? '').trim();
-      finish(!j.is_error && !!text, text || 'The agent finished without a summary.');
-    } catch {
-      finish(false, (err || out || 'The run ended without output.').trim().slice(0, 600));
+    if (partial) final = claudeLine(partial, r.log, (sid) => (r.session = sid)) ?? final;
+    if (final) {
+      if (typeof final.cost === 'number') r.cost = final.cost;
+      return finish(final.ok, final.text);
     }
+    const text = (err || 'The run ended without output.').trim().slice(0, 600);
+    r.log.add('error', text);
+    finish(false, text);
   });
   // the task itself, plus a nudge to end with a short report for the manager
   child.stdin?.end(
@@ -154,9 +173,11 @@ function startOther(r: Run, broadcast: (raw: Record<string, unknown>) => void) {
   };
   const rn = buildRunner(r.agent!, { runId: r.runId, project: r.project, model: r.model, permission: r.permission, prompt: r.raw ? r.task : `${r.task}\n\nWhen you are done, end with a short report (2-4 sentences) for your manager: what you changed and anything they should check.` });
   if ('error' in rn) {
+    r.log.add('error', rn.error);
     setTimeout(() => finish(false, rn.error), 1500); // let the character reach a desk first
     return;
   }
+  r.log.add('info', `${detectAgents()[r.agent!].label} · ${r.model === 'default' ? 'default model' : r.model}`);
   const child = spawn(rn.cmd, rn.args, { cwd: r.project, env: runEnv(r.runId), shell: rn.shell, windowsHide: true });
   r.child = child;
   let out = '';
@@ -166,10 +187,11 @@ function startOther(r: Run, broadcast: (raw: Record<string, unknown>) => void) {
     const text = String(c);
     out += text;
     if (out.length > 400_000) out = out.slice(-200_000);
-    if (!rn.sessionFromLine) return;
+    if (!rn.sessionFromLine) return void r.log.add('say', text); // plain-text agents: show what they print
     const lines = (partial + text).split('\n');
     partial = lines.pop() ?? '';
     for (const l of lines) {
+      if (r.agent === 'codex') codexLine(l, r.log);
       const sid = rn.sessionFromLine(l);
       if (sid && !r.session) {
         r.session = sid;
@@ -191,6 +213,7 @@ function startOther(r: Run, broadcast: (raw: Record<string, unknown>) => void) {
       /* ignore */
     }
     const res = rn.parse(code, out, err, outText);
+    r.log.add(res.ok ? 'info' : 'error', res.ok ? 'Finished' : res.text);
     finish(res.ok, res.text);
   });
   if (rn.stdin !== undefined) child.stdin?.end(rn.stdin);
@@ -216,7 +239,20 @@ export async function handleRuns(
 
   if (url.startsWith('/api/projects')) return send(200, { ok: true, projects: projectCandidates(knownCwds()) });
   if (url.startsWith('/api/models')) return send(200, { ok: true, default: defaultModel() });
-  if (url.startsWith('/api/agents')) return send(200, { ok: true, agents: detectAgents() });
+  if (url.startsWith('/api/agents')) {
+    // availability plus every model each agent can use here (Claude's come from your gateway)
+    const agents = detectAgents();
+    const models = await agentModels(defaultModel());
+    for (const k of Object.keys(agents) as AgentKind[]) (agents[k] as any).options = models[k];
+    return send(200, { ok: true, agents });
+  }
+  if (url.startsWith('/api/run/log') && req.method === 'GET') {
+    // a run's live conversation: entries after position `since`
+    const u = new URL(url, 'http://x');
+    const r = runs.get(String(u.searchParams.get('runId')));
+    if (!r) return send(404, { ok: false, error: 'unknown run' });
+    return send(200, { ok: true, status: r.status, agent: r.agent ?? 'claude', model: r.model, ...r.log.since(Number(u.searchParams.get('since') ?? 0) || 0) });
+  }
   if (url.startsWith('/api/runs') && req.method === 'GET') return send(200, { ok: true, runs: [...runs.values()].map(publicRun).reverse() });
 
   let q: any = {};
@@ -231,6 +267,7 @@ export async function handleRuns(
     r.status = 'stopped';
     r.endedAt = Date.now();
     r.result = 'Stopped by the manager.';
+    r.log.add('error', '■ Stopped by the manager.');
     if (r.child) killTree(r.child);
     broadcast({ hook_event_name: 'RunDone', session_id: r.session ?? 'run:' + r.runId, office_run: r.runId, ok: false, summary: 'Stopped by the manager.' });
     r.onDone?.(false, 'Stopped by the manager.');
@@ -249,12 +286,13 @@ export async function handleRuns(
       runId,
       project,
       agent,
-      model: agent !== 'claude' ? String(q.model ?? 'default').slice(0, 60) : String(q.model ?? 'default') in MODEL_IDS ? String(q.model ?? 'default') : 'default',
+      model: cleanModel(q.model),
       permission: q.permission === 'auto' ? 'auto' : q.permission === 'readonly' ? 'readonly' : 'edit',
       raw: !!q.raw,
       task: task.slice(0, 24000),
       status: 'running',
       startedAt: Date.now(),
+      log: new RunLog(),
     };
     runs.set(runId, r);
     startRun(r, broadcast);
@@ -267,23 +305,32 @@ export async function handleRuns(
 export function launchRun(
   o: { runId: string; project: string; model: string; permission: Run['permission']; task: string; raw?: boolean; agent?: AgentKind },
   broadcast: (raw: Record<string, unknown>) => void,
-): Promise<{ ok: boolean; text: string }> {
+): Promise<{ ok: boolean; text: string; stopped: boolean }> {
   return new Promise((resolve) => {
     const r: Run = {
       runId: o.runId,
       project: o.project,
-      model: !o.agent || o.agent === 'claude' ? (o.model in MODEL_IDS ? o.model : 'default') : o.model,
+      model: cleanModel(o.model),
       agent: o.agent,
       permission: o.permission,
       raw: o.raw,
       task: o.task,
       status: 'running',
       startedAt: Date.now(),
-      onDone: (ok, text) => resolve({ ok, text }),
+      log: new RunLog(),
+      onDone: (ok, text) => resolve({ ok, text, stopped: r.status === 'stopped' }),
     };
     runs.set(r.runId, r);
     startRun(r, broadcast);
   });
+}
+
+/** The office run (still running) that a Claude Code / Codex session belongs to, if any. */
+export function runningRunForSession(session: string): string | undefined {
+  const id = sessionRuns.get(session);
+  if (id && runs.get(id)?.status === 'running') return id;
+  for (const r of runs.values()) if (r.status === 'running' && r.session === session) return r.runId;
+  return undefined;
 }
 
 /** Stop a run started by anyone. */
@@ -293,6 +340,7 @@ export function stopRun(runId: string, broadcast: (raw: Record<string, unknown>)
   r.status = 'stopped';
   r.endedAt = Date.now();
   r.result = 'Stopped by the manager.';
+  r.log.add('error', '■ Stopped by the manager.');
   if (r.child) killTree(r.child);
   broadcast({ hook_event_name: 'RunDone', session_id: r.session ?? 'run:' + r.runId, office_run: r.runId, ok: false, summary: 'Stopped by the manager.' });
   r.onDone?.(false, 'Stopped by the manager.');
