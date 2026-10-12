@@ -4,8 +4,9 @@ import type { Plugin, Connect } from 'vite';
 import type { ServerResponse, IncomingMessage } from 'node:http';
 import path from 'node:path';
 import { handleChat, type SessionInfo } from './chat';
-import { handleRuns } from './runs';
+import { handleRuns, runForSession } from './runs';
 import { handleTeam } from './team';
+import { watchCodex, watchZcode, fromCursor } from './sources';
 import { handleAsk, handleAnswer, markVisible, pendingAsks, type AskPayload } from './asks';
 import fs from 'node:fs';
 
@@ -23,6 +24,8 @@ export interface OfficeEvent {
   subModel?: string;
   /** set on events from tasks dispatched at the manager desk */
   runId?: string;
+  /** which agent product this came from: claude, codex, cursor or zcode */
+  source?: string;
   ok?: boolean;
   /** questions / permission prompts waiting for an answer in the office */
   ask?: AskPayload | { id: string; how: string };
@@ -168,6 +171,7 @@ export function normalize(raw: Record<string, any>): OfficeEvent {
     tool,
     toolUseId: raw.tool_use_id ? String(raw.tool_use_id) : undefined,
     runId: raw.office_run ? String(raw.office_run) : undefined,
+    source: raw.office_source ? String(raw.office_source) : 'claude',
     ok: typeof raw.ok === 'boolean' ? raw.ok : undefined,
     ask: raw.ask,
     team: raw.team,
@@ -200,7 +204,17 @@ const middleware: Connect.NextHandleFunction = async (req, res, next) => {
   const url = req.url ?? '';
   if (url.startsWith('/api/event') && req.method === 'POST') {
     try {
-      const raw = JSON.parse((await readBody(req)) || '{}');
+      let raw = JSON.parse((await readBody(req)) || '{}');
+      // Cursor hooks use their own names: translate (and drop events we don't show)
+      if (raw.office_source === 'cursor') {
+        const t = fromCursor(raw);
+        if (!t) {
+          res.statusCode = 204;
+          res.end();
+          return;
+        }
+        raw = t;
+      }
       remember(raw);
       broadcast({ ...normalize(raw), ...modelFor(raw) });
       res.statusCode = 204;
@@ -210,7 +224,7 @@ const middleware: Connect.NextHandleFunction = async (req, res, next) => {
     res.end();
     return;
   }
-  if (url.startsWith('/api/projects') || url.startsWith('/api/models') || url.startsWith('/api/runs') || url.startsWith('/api/run')) {
+  if (url.startsWith('/api/projects') || url.startsWith('/api/models') || url.startsWith('/api/agents') || url.startsWith('/api/runs') || url.startsWith('/api/run')) {
     const body = req.method === 'POST' ? await readBody(req) : '';
     await handleRuns(req, res, body, () => [...sessions.values()].map((s) => s.cwd ?? ''), (raw) => broadcast({ ...normalize(raw), ...modelFor(raw) }));
     return;
@@ -280,14 +294,31 @@ const middleware: Connect.NextHandleFunction = async (req, res, next) => {
   next();
 };
 
+let watching = false;
+/** Follow the logs of other coding agents (Codex, Z Code) so they show up in their rooms. */
+function startWatchers() {
+  if (watching) return;
+  watching = true;
+  const emit = (raw: Record<string, unknown>) => {
+    // a Codex run started by a Work-room team: show its activity on that team member
+    const run = runForSession(String(raw.session_id ?? ''));
+    if (run && !raw.office_run) raw.office_run = run;
+    broadcast({ ...normalize(raw as Record<string, any>), ...modelFor(raw as Record<string, any>) });
+  };
+  watchCodex(emit);
+  watchZcode(emit);
+}
+
 export function agentBridge(): Plugin {
   return {
     name: 'claude-agent-bridge',
     configureServer(server) {
       server.middlewares.use(middleware);
+      startWatchers();
     },
     configurePreviewServer(server) {
       server.middlewares.use(middleware);
+      startWatchers();
     },
   };
 }

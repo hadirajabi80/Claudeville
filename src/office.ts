@@ -4,13 +4,16 @@ import { Agent, type Action } from './agent';
 import { variantFor } from './character';
 import { hex } from './palette';
 import { modelLabel, type Activity, type AskPayload, type SpawnOptions, type Stage } from './types';
-import type { Desk, Spot, World } from './world';
+import { localOf, type Desk, type Spot, type World } from './world';
 import type { Effects } from './effects';
 import type { Sound } from './sound';
 import type { Emotes, EmoteKind } from './emotes';
 import * as R from './reactions';
 import { trimShadowCasters } from './perf';
 import { pickName } from './names';
+
+/** Index of the Work room, where mixed teams meet. */
+export const WORK_ROOM = 4;
 
 const tmp = new THREE.Vector3();
 
@@ -42,12 +45,25 @@ export function verb(a: Activity): string {
 
 export class Office implements Stage {
   readonly agents = new Map<string, Agent>();
+  /** the room the camera / player is in: only it animates screens and plays ambience */
+  activeRoom = 0;
+  private wasNearDoorRoom: boolean[] = [];
+  /** your own character, when it walks around: doors open for you too */
+  visitor: THREE.Vector3 | null = null;
+
+  /** The Claude room by default. */
+  get world() {
+    return this.worlds[0];
+  }
+
+  worldOf(a: Agent) {
+    return this.worlds[a.room] ?? this.worlds[0];
+  }
   private target = new Map<string, Spot | null>(); // where each agent is heading
   private sessionDesk = new Map<string, number>();
   private steamTimer = 0;
   private resumeFn = new Map<string, () => void>();
   private typeTimers = new Map<string, number>();
-  private wasNearDoor = false;
   private coffeeTimer = 12;
   private voiceAt = new Map<string, number>();
   private anchors = new Map<string, () => THREE.Vector3>();
@@ -57,7 +73,7 @@ export class Office implements Stage {
 
   constructor(
     private scene: THREE.Scene,
-    private world: World,
+    readonly worlds: World[],
     private fx: Effects,
     private sound: Sound,
   ) {}
@@ -76,6 +92,7 @@ export class Office implements Stage {
         ? { name: o.name, gender: 'm' as const }
         : pickName(o.role === 'lead' ? o.session : id + o.session, taken);
     const a = new Agent(id, o.role, variantFor(o.role, id), o.session, nm.name, o.subtitle, nm.gender);
+    a.room = Math.max(0, Math.min(this.worlds.length - 1, o.room ?? 0));
     trimShadowCasters(a.rig.root);
     this.scene.add(a.rig.root);
     this.agents.set(id, a);
@@ -84,7 +101,8 @@ export class Office implements Stage {
     a.onEvent = (e) => {
       if (e !== 'step') return;
       const p = a.position;
-      const onRug = p.x > -6.4 && p.x < -3.8 && p.z > 0.1 && p.z < 3.1;
+      const l = localOf(p);
+      const onRug = l.x > -6.4 && l.x < -3.8 && l.z > 0.1 && l.z < 3.1;
       this.sound.step(p.clone(), onRug, a.role === 'sub' ? 0.7 : 0.85);
     };
     a.onSay = (text, tone) => {
@@ -100,9 +118,9 @@ export class Office implements Stage {
       const spot = this.pickLounge(a);
       this.teleport(a, spot, 'rest');
     } else {
-      a.place(this.world.doorOut, Math.PI / 2);
+      a.place(this.worldOf(a).doorOut, Math.PI / 2);
       a.say(o.role === 'sub' ? 'hi! 👋' : `Hi! ${o.subtitle}`, 'say', 2.5);
-      this.sound.pop(this.world.doorIn.clone().setY(1));
+      this.sound.pop(this.worldOf(a).doorIn.clone().setY(1));
       a.popIn();
       this.moveTo(a, this.pickLounge(a), [{ kind: 'rest' }], [], true);
     }
@@ -244,7 +262,7 @@ export class Office implements Stage {
     const id = 'team:' + memberId;
     let a = this.agents.get(id);
     if (!a) {
-      this.spawn(id, { role: 'lead', name: o.name, subtitle: o.subtitle, session: id, instant: false, fixedName: o.name, gender: o.gender });
+      this.spawn(id, { role: 'lead', name: o.name, subtitle: o.subtitle, session: id, instant: false, fixedName: o.name, gender: o.gender, room: WORK_ROOM });
       a = this.agents.get(id)!;
     }
     a.subtitle = o.subtitle;
@@ -260,15 +278,16 @@ export class Office implements Stage {
   }
 
   /** Call a new agent to the manager desk. Resolves with its id once it stands in front of you. */
-  summon(runId: string, project: string, model: string): Promise<string> {
+  summon(runId: string, project: string, model: string, room = 0): Promise<string> {
     const id = 'run:' + runId;
     const name = project.split(/[\\/]/).filter(Boolean).pop() ?? project;
     return new Promise((resolve) => {
-      this.spawn(id, { role: 'lead', name: 'Agent', subtitle: name, session: 'run:' + runId, instant: false });
+      this.spawn(id, { role: 'lead', name: 'Agent', subtitle: name, session: 'run:' + runId, instant: false, room });
       const a = this.agents.get(id)!;
       if (model) a.model = model;
       a.say(pick(['Coming, boss!', 'On my way!', 'You rang?']), 'say', 2);
-      const spot = this.world.manager.visitors.find((s) => !s.occupant) ?? this.world.manager.visitors[1];
+      const mgr = this.worldOf(a).manager;
+      const spot = mgr.visitors.find((s) => !s.occupant) ?? mgr.visitors[1];
       let done = false;
       const arrive = () => {
         if (done) return;
@@ -284,7 +303,8 @@ export class Office implements Stage {
     const a = this.agents.get(id);
     if (!a) return;
     a.setActivity(null);
-    const spot = this.world.manager.visitors.find((s) => !s.occupant || s.occupant === id) ?? this.world.manager.visitors[0];
+    const mgr = this.worldOf(a).manager;
+    const spot = mgr.visitors.find((s) => !s.occupant || s.occupant === id) ?? mgr.visitors[0];
     const short = summary.replace(/\s+/g, ' ').trim();
     const pre: Partial<Action>[] = [];
     this.moveTo(
@@ -371,7 +391,7 @@ export class Office implements Stage {
           },
         });
       } else {
-        actions.push({ kind: 'turn', dur: 0.35, toYaw: spot.yaw, onDone: () => spot.node === 'COFFEE' && this.sound.coffee(this.world.coffeeSteam) });
+        actions.push({ kind: 'turn', dur: 0.35, toYaw: spot.yaw, onDone: () => spot.node === 'COFFEE' && this.sound.coffee(this.worldOf(a).coffeeSteam) });
       }
     }
     actions.push(...after);
@@ -390,7 +410,7 @@ export class Office implements Stage {
   }
 
   chairCircles() {
-    return this.world.desks.map((d) => {
+    return this.worlds.flatMap((w) => w.desks).map((d) => {
       const p = d.chair.getWorldPosition(new THREE.Vector3());
       return { x: p.x, z: p.z, r: 0.25 };
     });
@@ -422,7 +442,7 @@ export class Office implements Stage {
       pts.push(...back.map((p) => p.clone()));
     }
     const startPos = pts.length ? pts[pts.length - 1] : a.position;
-    const path = this.world.pathTo(startPos, spot, node);
+    const path = this.worldOf(a).pathTo(startPos, spot, node);
     // drop a first node that lies behind us (avoids walking back to a node we just passed)
     if (path.length > 1 && !from) {
       const d0 = startPos.distanceTo(path[0]);
@@ -470,7 +490,8 @@ export class Office implements Stage {
   }
 
   private pickDesk(a: Agent): Spot {
-    const desks = this.world.desks;
+    const w = this.worldOf(a);
+    const desks = w.desks;
     const free = (d: Spot) => !d.occupant || d.occupant === a.id;
     const last = this.sessionDesk.get(a.session);
     if (a.role === 'lead' && last !== undefined && free(desks[last])) return desks[last];
@@ -482,14 +503,15 @@ export class Office implements Stage {
       if (ld) order.sort((i, j) => Math.abs(desks[i].pos.x - ld.pos.x) - Math.abs(desks[j].pos.x - ld.pos.x) + (i < 4 ? 0.5 : 0) - (j < 4 ? 0.5 : 0));
     }
     for (const i of order) if (free(desks[i])) return desks[i];
-    return this.world.boards.find(free) ?? this.world.lounge.find(free) ?? this.world.boards[0];
+    return w.boards.find(free) ?? w.lounge.find(free) ?? w.boards[0];
   }
 
   private pickLounge(a: Agent): Spot {
     const free = (s: Spot) => !s.occupant || s.occupant === a.id;
-    const couches = this.world.lounge.filter((s) => s.kind === 'couch' && free(s));
+    const w = this.worldOf(a);
+    const couches = w.lounge.filter((s) => s.kind === 'couch' && free(s));
     if (couches.length) return couches[Math.floor(Math.random() * couches.length)];
-    return this.world.lounge.find(free) ?? this.world.boards.find(free) ?? this.world.lounge[3];
+    return w.lounge.find(free) ?? w.boards.find(free) ?? w.lounge[3];
   }
 
   private deskOf(a: Agent): Desk | undefined {
@@ -530,24 +552,30 @@ export class Office implements Stage {
   // ------------------------------------------------------------------------ frame
 
   update(dt: number, g: number) {
-    let nearDoor = false;
     let typing = 0;
+    const near = this.worlds.map(() => false);
     for (const a of this.agents.values()) {
       a.update(dt, g);
       const p = a.position;
-      if (Math.hypot(p.x + 7, p.z - 3.5) < 1.7 && a.walking) nearDoor = true;
+      const door = this.worldOf(a).doorPos;
+      if (Math.hypot(p.x - door.x, p.z - door.z) < 1.7 && a.walking) near[a.room] = true;
       if (a.busyWorking && a.seated && (a.activity?.kind === 'write' || a.activity?.kind === 'search')) typing++;
     }
-    this.world.update(dt, g, nearDoor);
-    if (nearDoor !== this.wasNearDoor) {
-      this.wasNearDoor = nearDoor;
-      this.sound.door(nearDoor, new THREE.Vector3(-7, 1.2, 3.5));
-    }
+    this.worlds.forEach((w, i) => {
+      const v = this.visitor;
+      if (v && Math.hypot(v.x - w.doorPos.x, v.z - w.doorPos.z) < 1.9) near[i] = true;
+      w.update(dt, g, near[i], i === this.activeRoom);
+      if (near[i] !== !!this.wasNearDoorRoom[i]) {
+        this.wasNearDoorRoom[i] = near[i];
+        this.sound.door(near[i], w.doorPos);
+      }
+    });
+    const here = this.worlds[this.activeRoom] ?? this.worlds[0];
     this.coffeeTimer -= dt;
     if (this.coffeeTimer <= 0) {
       this.coffeeTimer = 20 + Math.random() * 30;
-      if (Math.random() < 0.5) this.sound.coffee(this.world.coffeeSteam);
-      else this.sound.birds(new THREE.Vector3(3.2, 2, -5));
+      if (Math.random() < 0.5) this.sound.coffee(here.coffeeSteam);
+      else this.sound.birds(here.origin.clone().add(new THREE.Vector3(3.2, 2, -5)));
     }
     for (const a of this.agents.values()) {
       const kind = a.activity?.kind;
@@ -566,8 +594,8 @@ export class Office implements Stage {
     this.steamTimer -= dt;
     if (this.steamTimer <= 0) {
       this.steamTimer = 0.45;
-      if (Math.random() < 0.5) this.fx.steam(this.world.coffeeSteam);
-      for (const d of this.world.desks) {
+      if (Math.random() < 0.5) this.fx.steam(here.coffeeSteam);
+      for (const d of here.desks) {
         const occ = d.occupant && this.agents.get(d.occupant);
         if (occ && occ.seated && Math.random() < 0.12) this.fx.steam(d.steamAt);
       }
@@ -575,9 +603,9 @@ export class Office implements Stage {
     void typing;
   }
 
-  boardItems() {
+  boardItems(room = 0) {
     const items: { name: string; text: string; color: string; done?: boolean }[] = [];
-    const leads = [...this.agents.values()].filter((a) => a.role === 'lead');
+    const leads = [...this.agents.values()].filter((a) => a.role === 'lead' && a.room === room);
     for (const l of leads) {
       const text = l.busyWorking || l.walking ? (l.activity ? verb(l.activity) : 'thinking') : 'on a break ☕';
       items.push({ name: l.model ? `${l.name} · ${l.model}` : l.name, text, color: hex(l.rig.accent), done: !l.busyWorking && !l.walking });

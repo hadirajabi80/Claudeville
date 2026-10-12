@@ -1,5 +1,6 @@
 // The manager's dispatch panel: pick a model and a project, write a task, ring the bell.
 // A new agent walks in, takes the task, works at a desk (a real `claude -p` run), then reports back.
+// Each room's desk calls that room's agent: Claude, ChatGPT Codex, Cursor or Z Code.
 import type { Office } from './office';
 import type { Director } from './director';
 import type { World } from './world';
@@ -7,6 +8,10 @@ import type { Sound } from './sound';
 import type { OfficeEvent } from './types';
 import { hex } from './palette';
 import { modelLabel } from './types';
+import { AGENTS, type AgentKind } from './team';
+
+/** which agent each room's manager desk calls (the Work room uses the team table instead) */
+const ROOM_AGENT: AgentKind[] = ['claude', 'codex', 'cursor', 'zcode'];
 
 interface Entry {
   runId: string;
@@ -14,6 +19,8 @@ interface Entry {
   name: string;
   color: string;
   model: string;
+  agent: AgentKind;
+  room: number;
   project: string;
   task: string;
   status: 'coming' | 'running' | 'done' | 'failed' | 'stopped';
@@ -42,12 +49,17 @@ export class Dispatch {
   private projects: string[] = [];
   private pollTimer = 0;
   private unavailable = new Set<string>();
+  /** the room whose desk the panel belongs to */
+  private room = 0;
+  /** chosen model per non-Claude agent (free text: each has its own model names) */
+  private otherModels: Partial<Record<AgentKind, string>> = {};
+  private agentStatus: Partial<Record<AgentKind, { available: boolean; hint: string; models: string[] }>> = {};
   onOpenChange?: (open: boolean) => void;
 
   constructor(
     private office: Office,
     private director: Director,
-    private world: World,
+    private worlds: World[],
     private sound: Sound,
   ) {
     try {
@@ -55,15 +67,17 @@ export class Dispatch {
       if (p.model) this.model = p.model;
       if (p.permission) this.permission = p.permission;
       if (p.project) this.project = p.project;
+      if (p.otherModels) this.otherModels = p.otherModels;
       for (const m of p.unavailable ?? []) this.unavailable.add(m);
     } catch {
       /* ignore */
     }
     this.el.innerHTML = `
-      <header><b>🗂️ Dispatch</b><small>Give an agent a real task</small><button class="x" title="Close (Esc)">✕</button></header>
+      <header><b class="ttl">🗂️ Dispatch</b><small>Give an agent a real task</small><button class="x" title="Close (Esc)">✕</button></header>
       <div class="body">
         <label>Model</label>
         <div class="models">${MODELS.map((m) => `<button data-m="${m.key}" title="${m.hint}">${m.label}</button>`).join('')}</div>
+        <div class="other"><input class="omodel" list="dispatch-models" placeholder="Model (default)" spellcheck="false" /><datalist id="dispatch-models"></datalist><div class="agentnote"></div></div>
         <label>Project folder</label>
         <select class="proj"></select>
         <input class="path" placeholder="…or paste a folder path, e.g. C:\\Projects\\my-app" spellcheck="false" />
@@ -89,6 +103,11 @@ export class Dispatch {
       this.save();
     };
     this.el.querySelector<HTMLButtonElement>('.go')!.onclick = () => this.call();
+    const om = this.el.querySelector<HTMLInputElement>('.omodel')!;
+    om.onchange = () => {
+      this.otherModels[this.agent] = om.value.trim() || 'default';
+      this.save();
+    };
     // typing here must never move the player or fire hotkeys
     for (const f of this.el.querySelectorAll<HTMLElement>('input, textarea, select')) {
       f.addEventListener('keydown', (e) => {
@@ -106,11 +125,51 @@ export class Dispatch {
     return this.el.classList.contains('open');
   }
 
-  open() {
+  private get agent(): AgentKind {
+    return ROOM_AGENT[this.room] ?? 'claude';
+  }
+
+  private get world(): World {
+    return this.worlds[this.room] ?? this.worlds[0];
+  }
+
+  /** Point the panel at a room's desk (and its agent). */
+  private setRoom(room: number) {
+    this.room = room >= 0 && room < ROOM_AGENT.length ? room : 0;
+    const ag = AGENTS[this.agent];
+    const claude = this.agent === 'claude';
+    this.el.querySelector('.ttl')!.textContent = claude ? '🗂️ Dispatch' : `🗂️ Dispatch · ${ag.label}`;
+    this.el.querySelector<HTMLElement>('.models')!.style.display = claude ? '' : 'none';
+    this.el.querySelector<HTMLElement>('.other')!.style.display = claude ? 'none' : '';
+    this.el.querySelector<HTMLButtonElement>('.go')!.textContent = claude ? '🔔 Call an agent' : `🔔 Call a ${ag.label} agent`;
+    this.el.querySelector<HTMLInputElement>('.omodel')!.value = this.otherModels[this.agent] ?? 'default';
+    this.syncAgent();
+  }
+
+  private async loadAgents() {
+    const j = await this.api('/api/agents');
+    if (!j.ok) return;
+    this.agentStatus = j.agents;
+    this.syncAgent();
+  }
+
+  /** Model suggestions and a readiness note for the room's agent. */
+  private syncAgent() {
+    const st = this.agentStatus[this.agent];
+    const dl = this.el.querySelector('#dispatch-models')!;
+    dl.innerHTML = (st?.models ?? ['default']).map((m) => `<option value="${esc(m)}"></option>`).join('');
+    const note = this.el.querySelector('.other .agentnote')!;
+    note.textContent = st ? (st.available ? `${AGENTS[this.agent].label} is ready on this PC.` : `⚠ ${st.hint}`) : '';
+    note.classList.toggle('bad', !!st && !st.available);
+  }
+
+  open(room = this.room) {
+    this.setRoom(room);
     this.el.classList.add('open');
     document.body.classList.add('dispatching');
     this.loadProjects();
     this.loadDefaultModel();
+    this.loadAgents();
     this.render();
     setTimeout(() => this.el.querySelector<HTMLTextAreaElement>('.task')!.focus(), 30);
     clearInterval(this.pollTimer);
@@ -127,14 +186,14 @@ export class Dispatch {
     this.onOpenChange?.(false);
   }
 
-  toggle() {
+  toggle(room?: number) {
     if (this.isOpen) this.close();
-    else this.open();
+    else this.open(room);
   }
 
   private save() {
     try {
-      localStorage.setItem(PREF, JSON.stringify({ model: this.model, permission: this.permission, project: this.project, unavailable: [...this.unavailable] }));
+      localStorage.setItem(PREF, JSON.stringify({ model: this.model, permission: this.permission, project: this.project, unavailable: [...this.unavailable], otherModels: this.otherModels }));
     } catch {
       /* ignore */
     }
@@ -209,6 +268,17 @@ export class Dispatch {
     }
     taskEl.value = '';
     const runId = 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const agentKind = this.agent;
+    const room = this.room;
+    const claude = agentKind === 'claude';
+    const om = (this.el.querySelector<HTMLInputElement>('.omodel')!.value.trim() || 'default').slice(0, 60);
+    if (!claude) {
+      this.otherModels[agentKind] = om;
+      this.save();
+    }
+    const model = claude ? this.model : om;
+    // the label over their head: the model, or the agent's name when it uses its default
+    const label = claude ? LABEL[this.model] : om !== 'default' ? om : AGENTS[agentKind].label;
     this.world.ringBell();
     this.sound.bell(this.world.manager.center.clone().setY(0.9));
 
@@ -217,15 +287,17 @@ export class Dispatch {
       charId: 'run:' + runId,
       name: '…',
       color: '#D97757',
-      model: LABEL[this.model] || 'Default',
+      model: label || 'Default',
+      agent: agentKind,
+      room,
       project,
       task,
       status: 'coming',
       startedAt: Date.now(),
     };
     this.entries.unshift(entry);
-    this.director.expectRun(runId, entry.charId);
-    const arrived = this.office.summon(runId, project, LABEL[this.model]);
+    this.director.expectRun(runId, entry.charId, room);
+    const arrived = this.office.summon(runId, project, label, room);
     const a = this.office.agents.get(entry.charId);
     if (a) {
       entry.name = a.name;
@@ -236,7 +308,7 @@ export class Dispatch {
     const agent = this.office.agents.get(entry.charId);
     agent?.say('Yes, boss? 🙂', 'say', 1.6);
     await new Promise((r) => setTimeout(r, 900));
-    const j = await this.api('/api/run', { runId, project, model: this.model, permission: this.permission, task });
+    const j = await this.api('/api/run', { runId, project, model, agent: agentKind, permission: this.permission, task });
     if (!j.ok) {
       entry.status = 'failed';
       entry.result = j.error || 'Could not start the task.';
@@ -259,7 +331,7 @@ export class Dispatch {
     entry.result = e.detail;
     this.noteModelError(entry);
     entry.endedAt = Date.now();
-    this.sound.ding(this.world.manager.center.clone().setY(1));
+    this.sound.ding((this.worlds[entry.room] ?? this.worlds[0]).manager.center.clone().setY(1));
     this.render();
   }
 
@@ -267,7 +339,7 @@ export class Dispatch {
   private noteModelError(entry: Entry) {
     const r = entry.result ?? '';
     if (!/not allowed to access model|model.*not (available|found)|unrecognized_model/i.test(r)) return;
-    const key = MODELS.find((m) => m.label === entry.model)?.key;
+    const key = entry.agent === 'claude' ? MODELS.find((m) => m.label === entry.model)?.key : undefined;
     if (key && key !== 'default') {
       this.unavailable.add(key);
       this.save();
@@ -315,7 +387,7 @@ export class Dispatch {
       const secs = Math.round(((e.endedAt ?? now) - e.startedAt) / 1000);
       const time = secs >= 60 ? `${Math.floor(secs / 60)}m ${secs % 60}s` : `${secs}s`;
       div.innerHTML = `
-        <div class="top"><i style="background:${e.color}"></i><b>${esc(e.name)}</b><span class="mdl">${esc(e.model)}</span>
+        <div class="top"><i style="background:${e.color}"></i><b>${esc(e.name)}</b>${e.agent !== 'claude' ? `<span class="agent">${AGENTS[e.agent].icon}</span>` : ''}<span class="mdl">${esc(e.model)}</span>
           <span class="chip ${e.status}">${e.status}</span><span class="time">${time}</span></div>
         <div class="what" title="${esc(e.task)}">${esc(e.task)}</div>
         <div class="where">📁 ${esc(e.project)}</div>`;
@@ -335,10 +407,15 @@ export class Dispatch {
       }
       list.appendChild(div);
     }
-    // the manager's own monitor mirrors the list
-    this.world.drawManagerScreen(
-      this.entries.map((e) => `${e.status === 'done' ? '✓' : e.status === 'failed' || e.status === 'stopped' ? '✗' : '▶'} ${e.name} · ${e.model} — ${e.task}`),
-    );
+    // each room's manager monitor mirrors that room's tasks
+    this.worlds.forEach((w, i) => {
+      if (i >= ROOM_AGENT.length) return; // the Work room's screen belongs to the team
+      w.drawManagerScreen(
+        this.entries
+          .filter((e) => e.room === i)
+          .map((e) => `${e.status === 'done' ? '✓' : e.status === 'failed' || e.status === 'stopped' ? '✗' : '▶'} ${e.name} · ${e.model} — ${e.task}`),
+      );
+    });
   }
 }
 

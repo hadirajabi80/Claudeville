@@ -5,6 +5,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { launchRun, stopRun } from './runs';
+import type { AgentKind } from './agents';
 
 type Perm = 'readonly' | 'edit' | 'auto';
 
@@ -15,6 +16,8 @@ export interface Member {
   name: string;
   gender: 'm' | 'f';
   model: string;
+  /** which coding agent this member is (Claude, Codex, Cursor or Z Code) */
+  agent: AgentKind;
   skills: string[];
   perm: Perm;
 }
@@ -83,7 +86,10 @@ let stopRequested = false;
 const title = (m: Member) => ROLE_TITLE[m.role] ?? m.role;
 
 function roster(members: Member[]) {
-  return members.map((m) => `- ${m.id}: ${m.name}, ${m.level} ${title(m)} (skills: ${m.skills.join(', ')}). Duty: ${ROLE_DUTY[m.role] ?? ''}`).join('\n');
+  const agentName: Record<string, string> = { claude: 'Claude', codex: 'ChatGPT Codex', cursor: 'Cursor', zcode: 'Z Code' };
+  return members
+    .map((m) => `- ${m.id}: ${m.name}, ${m.level} ${title(m)} (works as ${agentName[m.agent] ?? 'Claude'}${m.model && m.model !== 'default' ? ' / ' + m.model : ''}; skills: ${m.skills.join(', ')}). Duty: ${ROLE_DUTY[m.role] ?? ''}`)
+    .join('\n');
 }
 
 function persona(m: Member, members: Member[]) {
@@ -130,7 +136,7 @@ async function runTeam(s: TeamState, broadcast: (raw: Record<string, unknown>) =
   /** Tell the page which character does this run, then start it. */
   const run = (m: Member, prompt: string, perm: Perm, runId = newRun()) => {
     broadcast({ hook_event_name: 'TeamTask', session_id: 'team', office_run: runId, member: m });
-    return launchRun({ runId, project: s.project, model: m.model, permission: perm, task: prompt, raw: true }, broadcast);
+    return launchRun({ runId, project: s.project, model: m.model, permission: perm, task: prompt, raw: true, agent: m.agent }, broadcast);
   };
 
   const members = s.members;
@@ -277,7 +283,8 @@ export async function handleTeam(req: IncomingMessage, res: ServerResponse, body
       level: LEVEL_NOTE[m.level] ? m.level : 'Senior',
       name: String(m.name ?? 'Teammate').slice(0, 16),
       gender: m.gender === 'f' ? 'f' : 'm',
-      model: String(m.model ?? 'default'),
+      model: String(m.model ?? 'default').slice(0, 60),
+      agent: (['claude', 'codex', 'cursor', 'zcode'].includes(m.agent) ? m.agent : 'claude') as AgentKind,
       skills: (Array.isArray(m.skills) ? m.skills : []).map(String).slice(0, 12),
       perm: m.perm === 'readonly' || m.perm === 'auto' ? m.perm : 'edit',
     }));

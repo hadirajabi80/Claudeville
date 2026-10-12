@@ -29,6 +29,24 @@ Remove them with:
 npm run hooks:uninstall
 ```
 
+## Rooms
+
+Claudeville is a building of five square rooms on a grid: Claude, ChatGPT and Cursor on top, Z Code and Work below, with a small garden in the free corner. Neighbouring rooms share a wall with a doorway in it (a sign over each one names the room behind it), so you can simply walk from room to room. The tabs at the top jump straight to a room (each shows how many agents are inside), **🗺 All** shows the whole building at once, and in the overview a double-click on the floor glides the camera there.
+
+| Room | Who works there |
+| --- | --- |
+| **Claude** | Your Claude Code sessions and their subagents |
+| **ChatGPT** | ChatGPT Codex sessions (desktop app or CLI) |
+| **Cursor** | Cursor agent chats |
+| **Z Code** | Z Code sessions |
+| **Work** | Mixed teams you build, where agents of different kinds work together |
+
+How each agent is seen:
+
+- **Claude Code** sends events through hooks (`npm run hooks:install`).
+- **Codex** and **Z Code** need nothing installed: Claudeville reads the session logs they already write (`~/.codex/sessions` and `~/.zcode`). Only tool names, file names and short labels are shown.
+- **Cursor** gets a small after-the-fact hook in `~/.cursor/hooks.json`, added by the same `npm run hooks:install`. It only reports what already happened and never approves or blocks anything.
+
 ## How it maps
 
 | Claude Code event | In the office |
@@ -92,13 +110,13 @@ This works through a waiting hook that is only active while Claudeville is open 
 
 ## The manager desk
 
-Walk up to the big desk at the front and press **E** to sit in the boss chair, or click **🗂️ Dispatch** from anywhere. Pick a model, a project folder and what the agent may do (edit files, or edit files and run commands), write the task and ring the bell. A new agent walks in, takes the task, works on it for real at a free desk (a `claude -p` run in that folder), then comes back to your desk to report and leaves. The task list shows live status, a Stop button and the final report.
+Every room has one. Walk up to the big desk at the front and press **E** to sit in the boss chair, or click **🗂️ Dispatch** from anywhere. The desk calls the room's own agent: Claude in the Claude room, Codex in the ChatGPT room, Cursor in the Cursor room and Z Code in the Z Code room (for those, type any model name the agent knows, or leave it at *default*). Pick a model, a project folder and what the agent may do (edit files, or edit files and run commands), write the task and ring the bell. A new agent walks in, takes the task, works on it for real at a free desk (a `claude -p` run in that folder), then comes back to your desk to report and leaves. The task list shows live status, a Stop button and the final report.
 
 Models your API key cannot use are crossed out automatically after the first refusal; **Default** always uses the model your Claude Code is set to.
 
-## Team mode
+## Team mode (the Work room)
 
-Press **👥 Team** to build a team. For each member pick a role (Team Lead, Product Owner, UI/UX Designer, Frontend, Backend, DevOps, QA, Security, Data, Technical Writer), a seniority level (Junior to Principal), skills, a model and what they may do (read only, edit files, or edit files and run commands). **Use starter team** fills in a lead, a product owner, frontend and backend engineers, DevOps and QA.
+Press **👥 Team** (or sit at the Work room's manager desk) to build a team. For each member pick which agent they are (**Claude**, **ChatGPT Codex**, **Cursor** or **Z Code**), a model for that agent, a role (Team Lead, Product Owner, UI/UX Designer, Frontend, Backend, DevOps, QA, Security, Data, Technical Writer), a seniority level (Junior to Principal), skills, a model and what they may do (read only, edit files, or edit files and run commands). **Use starter team** fills in a lead, a product owner, frontend and backend engineers, DevOps and QA.
 
 Write a request for the team, pick the project folder and press **🚀 Send to team**:
 
@@ -106,7 +124,9 @@ Write a request for the team, pick the project folder and press **🚀 Send to t
 2. Members work in phases: everyone in a phase works at the same time, each as an expert in their own field, and stays out of the others' areas. They hand off notes in `TEAM_NOTES.md`.
 3. The Team Lead reviews the result against the request and writes the final summary.
 
-Every member is a character with the name you gave them: they walk to a desk when their task starts, report at the manager desk when it is done and wait in the lounge for the next job. The work is coordinated by the server, so it keeps going if you reload or close the page; **■ Stop** stops the whole team.
+Mix agents freely, for example a Claude Team Lead on Fable who plans and reviews, a Cursor frontend engineer and a Codex backend engineer who implement. The lead knows which agent and model each member is when it plans. A member whose agent is not installed or signed in on this PC is flagged in the panel, and its task fails with a plain explanation instead of stalling the team.
+
+Every member is a character with the name you gave them, working in the Work room: they walk to a desk when their task starts, report at the manager desk when it is done and wait in the lounge for the next job. The work is coordinated by the server, so it keeps going if you reload or close the page; **■ Stop** stops the whole team.
 
 ## Your character and the team
 
@@ -120,6 +140,16 @@ Click 💬 next to any agent in the session list, or walk up to an agent and pre
 
 Click 🎤 in the chat window and speak, then click it again to send. Or walk up to an agent and **hold R**, speak, and let go: it works like a walkie-talkie. Choose English or Persian under the chat header. Agents read their answers aloud with a voice that matches them (🔊 turns this off). Voice uses the browser's built-in speech features, so it works best in Chrome or Edge, and Persian voices for reading answers aloud are available in Edge.
 
+## Agents other than Claude
+
+| Agent | Needed to run tasks |
+| --- | --- |
+| ChatGPT Codex | The Codex app or CLI, signed in (`codex login`) |
+| Cursor | Cursor's command-line agent, `cursor-agent` (cursor.com/cli), signed in |
+| Z Code | The Z Code CLI, `zcode`, on PATH |
+
+The Team and Dispatch panels show whether each one is ready on this PC.
+
 ## Controls
 
 Drag to orbit, scroll to zoom, click a name tag or a session row to follow that agent. The speaker button turns on keyboard clacks and chimes.
@@ -127,7 +157,8 @@ Drag to orbit, scroll to zoom, click a name tag or a session row to follow that 
 ## Files
 
 - `server/bridge.ts` receives hook events and streams them to the page.
-- `hooks/relay.mjs` is the hook command that forwards events.
+- `hooks/relay.mjs` is the hook command that forwards events (Claude Code and Cursor).
+- `server/sources.ts` follows Codex and Z Code session logs; `server/agents.ts` runs tasks with Codex, Cursor and Z Code.
 - `src/director.ts` turns events into character commands.
 - `src/office.ts`, `src/agent.ts`, `src/pose.ts` and `src/character.ts` handle desks, movement, animation and the characters.
 - `src/world.ts` and `src/screen.ts` build the office and the live monitors.

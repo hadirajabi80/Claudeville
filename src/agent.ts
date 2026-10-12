@@ -63,6 +63,8 @@ export class Agent {
   readonly quirks: P.Quirks;
   name: string;
   subtitle: string;
+  /** which room of the building this agent lives in */
+  room = 0;
   /** display label of the model, e.g. "Opus 5.5" */
   model = '';
   activity: Activity | null = null;

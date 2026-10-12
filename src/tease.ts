@@ -23,7 +23,7 @@ interface Ball {
   looked?: boolean;
 }
 
-const FLOOR_BOUNDS = { x0: -6.8, x1: 6.8, z0: -4.7, z1: 4.8 };
+const FLOOR_BOUNDS = { x0: -6.8, x1: 6.8, z0: -4.7, z1: 8.7 }; // in the room's own frame
 const GRAVITY = 9.8;
 
 export interface TeaseDeps {
@@ -576,8 +576,9 @@ export class Tease {
     if (this.dragging) {
       const p = new THREE.Vector3();
       if (this.planeHit(1.55, p)) {
-        p.x = THREE.MathUtils.clamp(p.x, FLOOR_BOUNDS.x0, FLOOR_BOUNDS.x1);
-        p.z = THREE.MathUtils.clamp(p.z, FLOOR_BOUNDS.z0, FLOOR_BOUNDS.z1);
+        const o = this.d.office.worldOf(this.dragging).origin;
+        p.x = THREE.MathUtils.clamp(p.x, o.x + FLOOR_BOUNDS.x0, o.x + FLOOR_BOUNDS.x1);
+        p.z = THREE.MathUtils.clamp(p.z, o.z + FLOOR_BOUNDS.z0, o.z + FLOOR_BOUNDS.z1);
         p.y = 0.45;
         this.dragging.holdAt(p, dt);
       }

@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import './style.css';
-import { World } from './world';
+import { World, ROOMS } from './world';
+import { buildGrounds, buildingBounds } from './building';
 import { Effects } from './effects';
 import { Office } from './office';
 import { Director } from './director';
@@ -44,15 +45,16 @@ scene.background = new THREE.Color(0xf6eee2);
 scene.fog = new THREE.Fog(0xf6eee2, 24, 42);
 
 const camera = new THREE.PerspectiveCamera(38, innerWidth / innerHeight, 0.1, 100);
-const HOME_POS = new THREE.Vector3(3.6, 7.4, 10.2);
-const HOME_TARGET = new THREE.Vector3(-0.9, 0.5, -0.5);
+// the view of one room, relative to its origin (rooms are 14 x 14: x -7..7, z -5..9)
+const HOME_TARGET = new THREE.Vector3(-0.3, 0.5, 1.4);
+const HOME_POS = HOME_TARGET.clone().add(new THREE.Vector3(4.6, 9.6, 12.6));
 camera.position.copy(HOME_POS);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.copy(HOME_TARGET);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.minDistance = 4;
-controls.maxDistance = 24;
+controls.maxDistance = 64;
 controls.minPolarAngle = 0.3;
 controls.maxPolarAngle = 1.3;
 controls.minAzimuthAngle = -1.2;
@@ -61,16 +63,20 @@ controls.screenSpacePanning = false;
 controls.update();
 
 // ------------------------------------------------------------------ the office
-const world = new World(scene);
+// the building: five square rooms on a grid (and a garden), neighbours joined by doorways
+const worlds = ROOMS.map((theme, i) => new World(scene, i, theme));
+const world = worlds[0];
+const WORK = 4;
+const grounds = buildGrounds(scene, worlds);
 // bake static furniture into a few big meshes (hundreds of draw calls → a few dozen)
-const merged = mergeStatic(scene, world.dynamicObjects());
-for (const d of world.desks) mergeStatic(d.chair, []);
-for (const o of world.dynamicObjects()) if (o.children.length > 3 && !world.desks.some((d) => d.chair === o || d.monitor === o)) mergeStatic(o, []);
+const merged = mergeStatic(scene, worlds.flatMap((w) => w.dynamicObjects()));
+for (const w of worlds) for (const d of w.desks) mergeStatic(d.chair, []);
+for (const w of worlds) for (const o of w.dynamicObjects()) if (o.children.length > 3 && !w.desks.some((d) => d.chair === o || d.monitor === o)) mergeStatic(o, []);
 console.info(`[office] merged ${merged.before} static meshes into ${merged.after}`);
 trimShadowCasters(scene, 0.12);
 const fx = new Effects(scene);
 const sound = new Sound();
-const office = new Office(scene, world, fx, sound);
+const office = new Office(scene, worlds, fx, sound);
 const director = new Director(office);
 const hud = new Hud();
 const demo = new Demo((e) => ingest(e, true));
@@ -133,15 +139,19 @@ tease.onToolChange = (t) => {
 tease.setTool('hand');
 
 // ------------------------------------------------------------------ your own character
-const colliders = new Colliders(world);
+const colliders = new Colliders(worlds, grounds);
 const player = new Player(scene, colliders, office, sound, fx, renderer.domElement);
 trimShadowCasters(player.agent.rig.root);
 const social = new Social(office, player, tease);
 const picker = new AvatarPicker();
-const dispatch = new Dispatch(office, director, world, sound);
+const dispatch = new Dispatch(office, director, worlds, sound);
 const answerCard = new AnswerCard();
-const team = new Team(office, director, world, sound);
-document.getElementById('teamBtn')!.onclick = () => team.toggle();
+const team = new Team(office, director, worlds[WORK], sound);
+document.getElementById('teamBtn')!.onclick = () => {
+  // teams meet in the Work room
+  if (!team.isOpen && activeRoom !== WORK) goToRoom(WORK);
+  team.toggle();
+};
 team.onOpenChange = (open) => {
   if (open) {
     chat.close();
@@ -185,7 +195,7 @@ presence();
 setInterval(presence, 10_000);
 document.addEventListener('visibilitychange', presence);
 const hintEl = document.getElementById('hint')!;
-document.getElementById('dispatchBtn')!.onclick = () => dispatch.toggle();
+document.getElementById('dispatchBtn')!.onclick = () => dispatch.toggle(activeRoom === WORK ? 0 : activeRoom);
 dispatch.onOpenChange = (open) => {
   if (open) {
     chat.close();
@@ -193,9 +203,9 @@ dispatch.onOpenChange = (open) => {
   }
 };
 player.onStandUp = () => dispatch.close();
-const MANAGER_STAND = world.manager.seat.clone().add(new THREE.Vector3(0.8, 0, 0));
+const roomWorld = () => worlds[activeRoom] ?? world;
 function nearManagerChair() {
-  return player.spawned && player.mode !== 'orbit' && !player.seat && player.position.distanceTo(world.manager.seat) < 1.5;
+  return player.spawned && player.mode !== 'orbit' && !player.seat && player.position.distanceTo(roomWorld().manager.seat) < 1.5;
 }
 const savedLook = savedAvatar();
 if (savedLook) player.setLook(savedLook.gender, savedLook.name);
@@ -243,7 +253,7 @@ const viewBtn = document.getElementById('view') as HTMLButtonElement;
 const crosshair = document.getElementById('crosshair')!;
 const MODE_LABEL: Record<CamMode, string> = { orbit: '🚶 Walk', third: '🎥 3rd person', first: '👀 1st person' };
 function spawnPlayer() {
-  if (!player.spawned) player.spawn(world.doorIn.clone(), Math.PI / 2);
+  if (!player.spawned) player.spawn(roomWorld().doorIn.clone(), Math.PI / 2);
 }
 function setMode(m: CamMode) {
   // first time stepping in: choose a male or female character and a name
@@ -329,9 +339,12 @@ addEventListener('keydown', (e) => {
       player.standUp();
     } else if (nearManagerChair()) {
       // take the boss chair and open the dispatch panel
-      player.sit(world.manager.seat, world.manager.seatYaw, MANAGER_STAND);
+      const w = roomWorld();
+      player.sit(w.manager.seat, w.manager.seatYaw, w.manager.seat.clone().add(new THREE.Vector3(0.8, 0, 0)));
       player.agent.say('Let’s get some work done.', 'say', 2);
-      dispatch.open();
+      // the Work room's desk is the team table; the others dispatch single agents
+      if (activeRoom === WORK) team.open();
+      else dispatch.open(activeRoom);
     } else player.interact();
   } else if (k === 'm') musicBtn.click();
 });
@@ -406,8 +419,92 @@ musicBtn.onclick = () => sound.toggleMusic();
 document.getElementById('reset')!.onclick = () => {
   hud.follow(null);
   if (player.mode !== 'orbit') setMode('orbit');
-  camGoal = { pos: HOME_POS.clone(), target: HOME_TARGET.clone() };
+  camGoal = roomHome(activeRoom);
 };
+
+// ------------------------------------------------------------------ rooms
+let activeRoom = 0;
+const roomHome = (i: number) => {
+  const off = (worlds[i] ?? world).origin;
+  return { pos: HOME_POS.clone().add(off), target: HOME_TARGET.clone().add(off) };
+};
+/** The whole building from high up: every room at once. */
+const BUILDING = buildingBounds();
+const overviewHome = () => {
+  const target = BUILDING.center.clone().setY(0.5).add(new THREE.Vector3(0, 0, 1));
+  return { pos: target.clone().add(new THREE.Vector3(4, 41, 31)), target };
+};
+const roomTabs = document.getElementById('rooms')!;
+const allBtn = document.createElement('button');
+allBtn.className = 'all';
+allBtn.innerHTML = '🗺 All';
+allBtn.title = 'See every room at once (double-click a room to fly into it)';
+allBtn.onclick = () => {
+  hud.follow(null);
+  if (player.mode !== 'orbit') setMode('orbit');
+  camGoal = overviewHome();
+};
+roomTabs.appendChild(allBtn);
+ROOMS.forEach((r, i) => {
+  const b = document.createElement('button');
+  if (i === 0) b.classList.add('on');
+  b.dataset.room = String(i);
+  b.innerHTML = `<i style="background:#${r.accent.toString(16).padStart(6, '0')}"></i>${r.short}<span class="n"></span>`;
+  b.title = `Go to the ${r.name} room`;
+  b.onclick = () => goToRoom(i);
+  roomTabs.appendChild(b);
+});
+function goToRoom(i: number) {
+  hud.follow(null);
+  if (player.spawned && player.mode !== 'orbit') {
+    // step into the front of that room, facing inside
+    player.standUp();
+    const w = worlds[i];
+    player.agent.place(w.origin.clone().add(new THREE.Vector3(1.0, 0, 6.2)), Math.PI);
+    player.viewYaw = Math.PI;
+  } else camGoal = roomHome(i);
+}
+/** The room whose square holds (or is nearest to) a point on the ground. */
+function roomNear(p: THREE.Vector3) {
+  let best = 0;
+  let bd = Infinity;
+  worlds.forEach((w, i) => {
+    const dx = Math.max(Math.abs(p.x - w.origin.x) - 7, 0);
+    const dz = Math.max(Math.abs(p.z - w.origin.z - 2) - 7, 0);
+    const d = dx * dx + dz * dz + 1e-3 * ((p.x - w.origin.x) ** 2 + (p.z - w.origin.z - 2) ** 2);
+    if (d < bd) {
+      bd = d;
+      best = i;
+    }
+  });
+  return best;
+}
+/** The room you are in: where your character stands, or where the overview camera looks. */
+function currentRoom() {
+  if (player.spawned && player.mode !== 'orbit') {
+    const r = colliders.roomAt(player.position);
+    // in a doorway (or the garden) you stay in the room you came from
+    if (r >= 0) return r;
+    return worlds[activeRoom]?.contains(player.position) ? activeRoom : roomNear(player.position);
+  }
+  return roomNear(controls.target);
+}
+// in the overview, double-click anywhere on the floor to glide there
+renderer.domElement.addEventListener('dblclick', (e) => {
+  if (player.mode !== 'orbit') return;
+  const ndc = new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  const ray = new THREE.Raycaster();
+  ray.setFromCamera(ndc, camera);
+  const hit = new THREE.Vector3();
+  if (!ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), hit)) return;
+  if (hit.x < BUILDING.x0 - 1 || hit.x > BUILDING.x1 + 1 || hit.z < BUILDING.z0 - 1 || hit.z > BUILDING.z1 + 1) return;
+  // a double-click on an agent is a tickle, not a trip
+  for (const a of office.agents.values()) if (!a.removed && a.position.distanceTo(hit) < 0.8) return;
+  hud.follow(null);
+  const off = camera.position.clone().sub(controls.target);
+  off.setLength(THREE.MathUtils.clamp(off.length(), 9, 17));
+  camGoal = { pos: hit.clone().setY(0.5).add(off), target: hit.clone().setY(0.5) };
+});
 document.getElementById('help')!.onclick = () => document.getElementById('helpbox')!.classList.toggle('open');
 document.getElementById('helpclose')!.onclick = () => document.getElementById('helpbox')!.classList.remove('open');
 
@@ -495,7 +592,11 @@ function frame(dt: number) {
     panelDirty = false;
     hud.renderPanel([...office.agents.values()], director.stats());
     chat.refresh();
-    world.drawBoard(office.boardItems());
+    worlds.forEach((w, i) => w.drawBoard(office.boardItems(i)));
+    // how many agents are in each room
+    const counts = worlds.map(() => 0);
+    for (const a of office.agents.values()) if (!a.removed) counts[a.room]++;
+    roomTabs.querySelectorAll<HTMLElement>('button[data-room]').forEach((b, i) => (b.querySelector('.n')!.textContent = counts[i] ? String(counts[i]) : ''));
   }
 
   if (hud.followId) {
@@ -520,6 +621,26 @@ function frame(dt: number) {
     const look = controls.target.clone().sub(camera.position);
     player.orbitYaw = Math.atan2(look.x, look.z);
   }
+  const room = currentRoom();
+  if (room !== activeRoom) {
+    activeRoom = room;
+    roomTabs.querySelectorAll('button').forEach((b) => b.classList.toggle('on', Number((b as HTMLElement).dataset.room) === room));
+    panelDirty = true;
+  }
+  office.activeRoom = activeRoom;
+  office.visitor = player.spawned ? player.position : null;
+  if (world.sun) {
+    // shadows follow the room you are in
+    const o = worlds[activeRoom].origin;
+    world.sun.position.set(o.x + 6, 10, o.z + 7);
+    world.sun.target.position.set(o.x, 0, o.z + 2);
+    world.sun.target.updateMatrixWorld();
+  }
+  // the fog only hides the far distance, however far out the overview camera is
+  const fog = scene.fog as THREE.Fog;
+  const camDist = player.mode === 'orbit' ? camera.position.distanceTo(controls.target) : 0;
+  fog.near = Math.max(24, camDist + 10);
+  fog.far = Math.max(42, camDist + 36);
   sound.setListener(camera);
   sound.update();
   talkAcc += dt;
@@ -557,7 +678,7 @@ function frame(dt: number) {
   }
   renderer.render(scene, camera);
   camera.position.sub(shake);
-  const tagged = [...office.agents.values()];
+  const tagged = [...office.agents.values()].filter((a) => a.room === activeRoom);
   if (player.spawned && player.mode !== 'first') tagged.push(player.agent);
   hud.update(tagged, camera, innerWidth, innerHeight);
 }

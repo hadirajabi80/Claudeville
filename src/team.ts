@@ -48,7 +48,20 @@ const MODELS: [string, string][] = [
   ['haiku', 'Haiku 4.5'],
   ['fable', 'Fable 5.1'],
 ];
-const modelName = (k: string) => MODELS.find((m) => m[0] === k)?.[1] ?? 'Default';
+const modelName = (k: string) => MODELS.find((m) => m[0] === k)?.[1] ?? (k && k !== 'default' ? k : 'Default');
+
+export type AgentKind = 'claude' | 'codex' | 'cursor' | 'zcode';
+export const AGENTS: Record<AgentKind, { label: string; icon: string }> = {
+  claude: { label: 'Claude', icon: '✳️' },
+  codex: { label: 'ChatGPT · Codex', icon: '🟢' },
+  cursor: { label: 'Cursor', icon: '⬛' },
+  zcode: { label: 'Z Code', icon: '🔷' },
+};
+interface AgentStatus {
+  available: boolean;
+  hint: string;
+  models: string[];
+}
 const PERMS: [Perm, string][] = [
   ['readonly', 'Read only'],
   ['edit', 'Edit files'],
@@ -62,6 +75,8 @@ export interface Member {
   name: string;
   gender: Gender;
   model: string;
+  /** which coding agent this member is */
+  agent: AgentKind;
   skills: string[];
   perm: Perm;
 }
@@ -98,6 +113,7 @@ export class Team {
   private project = '';
   private editing: string | null = null;
   private state: TeamState | null = null;
+  private agentStatus: Partial<Record<AgentKind, AgentStatus>> = {};
   private tick = 0;
   onOpenChange?: (open: boolean) => void;
 
@@ -109,7 +125,7 @@ export class Team {
   ) {
     try {
       const s = JSON.parse(localStorage.getItem(KEY) ?? '{}');
-      if (Array.isArray(s.members)) this.members = s.members;
+      if (Array.isArray(s.members)) this.members = s.members.map((m: Member) => ({ ...m, agent: m.agent ?? 'claude' }));
       if (s.project) this.project = s.project;
     } catch {
       /* ignore */
@@ -134,6 +150,7 @@ export class Team {
     this.el.classList.add('open');
     this.loadProjects();
     this.fetchState();
+    this.loadAgents();
     this.renderAll();
     clearInterval(this.tick);
     this.tick = window.setInterval(() => this.busy && this.renderProgress(), 1000);
@@ -171,6 +188,7 @@ export class Team {
       name: this.uniqueName(gender),
       gender,
       model: 'default',
+      agent: 'claude',
       skills: [...ROLES[role].skills],
       perm: ROLES[role].perm,
     });
@@ -198,7 +216,8 @@ export class Team {
       level: v('level'),
       name: name.slice(0, 16),
       gender: v('gender') as Gender,
-      model: v('model'),
+      model: v('model').trim() || 'default',
+      agent: v('agent') as AgentKind,
       skills: v('skills')
         .split(',')
         .map((s) => s.trim())
@@ -216,6 +235,8 @@ export class Team {
     set('level', m?.level ?? 'Senior');
     set('gender', m?.gender ?? 'm');
     set('name', m?.name ?? '');
+    set('agent', m?.agent ?? 'claude');
+    this.syncModels(m?.agent ?? 'claude');
     set('model', m?.model ?? 'default');
     set('skills', (m?.skills ?? ROLES[role].skills).join(', '));
     set('perm', m?.perm ?? ROLES[role].perm);
@@ -230,7 +251,7 @@ export class Team {
   }
 
   private bring(m: Member) {
-    return this.office.callMember(m.id, { name: m.name, gender: m.gender, subtitle: `${ROLES[m.role]?.title ?? m.role} · ${m.level}`, model: m.model === 'default' ? '' : modelName(m.model) });
+    return this.office.callMember(m.id, { name: m.name, gender: m.gender, subtitle: `${ROLES[m.role]?.title ?? m.role} · ${m.level}`, model: m.model === 'default' ? (m.agent && m.agent !== 'claude' ? AGENTS[m.agent].label : '') : modelName(m.model) });
   }
 
   /** Live events from the server: who does which run, and the team's progress. */
@@ -298,6 +319,26 @@ export class Team {
 
   // ------------------------------------------------------------------ rendering
 
+  private async loadAgents() {
+    const j = await this.api('/api/agents');
+    if (!j.ok) return;
+    this.agentStatus = j.agents;
+    const form = this.el.querySelector<HTMLFormElement>('form.add');
+    if (form) this.syncModels((form.elements.namedItem('agent') as HTMLSelectElement).value as AgentKind);
+    this.renderMembers();
+  }
+
+  /** Model suggestions and a status note for the chosen agent. */
+  private syncModels(agent: AgentKind) {
+    const dl = this.el.querySelector('#team-models');
+    const note = this.el.querySelector('.agentnote');
+    const st = this.agentStatus[agent];
+    const models = st?.models ?? (agent === 'claude' ? MODELS.map((m) => m[0]) : ['default']);
+    if (dl) dl.innerHTML = models.map((m) => `<option value="${esc(m)}">${esc(agent === 'claude' ? modelName(m) : m)}</option>`).join('');
+    if (note) note.textContent = st ? (st.available ? `${AGENTS[agent].label} is ready on this PC.` : `⚠ ${st.hint}`) : '';
+    note?.classList.toggle('bad', !!st && !st.available);
+  }
+
   private async loadProjects() {
     const j = await this.api('/api/projects');
     if (!j.ok) return;
@@ -312,7 +353,7 @@ export class Team {
 
   private renderAll() {
     this.el.innerHTML = `
-      <header><b>👥 Team</b><small>Build a team, give it a job</small><button class="x" title="Close (Esc)">✕</button></header>
+      <header><b>👥 Work Room team</b><small>Mix Claude, Codex, Cursor and Z Code</small><button class="x" title="Close (Esc)">✕</button></header>
       <div class="body">
         <label>Project folder</label>
         <select class="proj"></select>
@@ -326,7 +367,10 @@ export class Team {
             .map((l) => `<option>${l}</option>`)
             .join('')}</select></div>
           <div class="row"><select name="gender"><option value="m">Male</option><option value="f">Female</option></select><input name="name" placeholder="Name (random if empty)" maxlength="16" /><button type="button" class="dice" title="Random name">🎲</button></div>
-          <div class="row"><select name="model">${MODELS.map(([k, n]) => `<option value="${k}">${n}</option>`).join('')}</select><select name="perm">${PERMS.map(([k, n]) => `<option value="${k}">${n}</option>`).join('')}</select></div>
+          <div class="row"><select name="agent">${(Object.keys(AGENTS) as AgentKind[]).map((k) => `<option value="${k}">${AGENTS[k].icon} ${AGENTS[k].label}</option>`).join('')}</select><input name="model" list="team-models" placeholder="Model (default)" /></div>
+          <datalist id="team-models"></datalist>
+          <div class="agentnote"></div>
+          <div class="row"><select name="perm">${PERMS.map(([k, n]) => `<option value="${k}">${n}</option>`).join('')}</select></div>
           <input name="skills" placeholder="Skills, comma separated" />
           <div class="row"><button type="submit" class="addbtn">+ Add to team</button><button type="button" class="cancel" style="display:none">Cancel</button></div>
         </form>
@@ -346,6 +390,11 @@ export class Team {
       this.save();
     };
     const form = this.el.querySelector<HTMLFormElement>('form.add')!;
+    const agentSel = form.elements.namedItem('agent') as HTMLSelectElement;
+    agentSel.onchange = () => {
+      this.syncModels(agentSel.value as AgentKind);
+      (form.elements.namedItem('model') as HTMLInputElement).value = 'default';
+    };
     const roleSel = form.elements.namedItem('role') as HTMLSelectElement;
     roleSel.onchange = () => {
       const r = ROLES[roleSel.value];
@@ -389,7 +438,7 @@ export class Team {
       const a = this.office.agents.get('team:' + m.id);
       const div = document.createElement('div');
       div.className = 'member';
-      div.innerHTML = `<span class="ic">${r.icon}</span><div class="who"><b>${esc(m.name)}</b> <span class="mdl">${esc(modelName(m.model))}</span><div class="role">${m.level} ${r.title}</div><div class="skills">${m.skills
+      div.innerHTML = `<span class="ic">${r.icon}</span><div class="who"><b>${esc(m.name)}</b> <span class="agent">${AGENTS[m.agent ?? 'claude'].icon} ${AGENTS[m.agent ?? 'claude'].label}</span> <span class="mdl">${esc(modelName(m.model))}</span>${this.agentStatus[m.agent ?? 'claude'] && !this.agentStatus[m.agent ?? 'claude']!.available ? '<div class="warn">Can’t run on this PC yet</div>' : ''}<div class="role">${m.level} ${r.title}</div><div class="skills">${m.skills
         .map((s) => `<i>${esc(s)}</i>`)
         .join('')}</div></div><button class="ed" title="Edit">✎</button><button class="rm" title="Remove">✕</button>`;
       if (a) (div.querySelector('.ic') as HTMLElement).style.boxShadow = `inset 0 0 0 2px ${hex(a.rig.accent)}`;

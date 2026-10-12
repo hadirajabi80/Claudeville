@@ -1,6 +1,7 @@
-// Simple 2D (XZ) collision world for the player: boxes for furniture, circles for chairs, plants and agents.
+// Simple 2D (XZ) collision world for the player: boxes for furniture, circles for plants, chairs and agents,
+// and a set of walkable areas (every room's floor, the doorways between neighbouring rooms, and the garden).
 import * as THREE from 'three';
-import type { World } from './world';
+import { BACK_ARCH, TABLE, COOLER, type World } from './world';
 
 export interface Box {
   x0: number;
@@ -13,34 +14,89 @@ export interface Circle {
   z: number;
   r: number;
 }
-
-export const ROOM = { x0: -6.8, x1: 6.75, z0: -4.78, z1: 4.75 };
+/** A straight wall the third-person camera may not look through, with doorways in it. */
+interface Wall {
+  axis: 'x' | 'z'; // the wall is the line x = at (or z = at)
+  at: number;
+  from: number;
+  to: number;
+  gaps: [number, number][];
+}
+/** Extra walkable ground outside the rooms (the garden). */
+export interface Grounds {
+  areas: Box[];
+  boxes: Box[];
+  circles: Circle[];
+}
 
 export class Colliders {
   boxes: Box[] = [];
   circles: Circle[] = [];
+  /** floors you can stand on: one per room (same order as the rooms), then doorways and the garden */
+  areas: Box[] = [];
+  private rooms: number;
+  private walls: Wall[] = [];
 
-  constructor(world: World) {
+  constructor(worlds: World[], grounds?: Grounds) {
     const box = (cx: number, cz: number, hx: number, hz: number) => this.boxes.push({ x0: cx - hx, x1: cx + hx, z0: cz - hz, z1: cz + hz });
-    for (const d of world.desks) {
-      box(d.center.x, d.center.z, 0.72, 0.37);
+    for (const w of worlds) {
+      const ox = w.origin.x;
+      const oz = w.origin.z;
+      for (const d of w.desks) box(d.center.x, d.center.z, 0.72, 0.37);
+      box(ox - 5.52, oz + 1.6, 0.45, 1.15); // couch incl. arms
+      box(ox - 4.45, oz + 1.6, 0.2, 0.47); // low table
+      box(ox - 6.62, oz - 3.2, 0.37, 0.87); // coffee counter
+      box(ox - 6.78, oz - 0.6, 0.2, 0.62); // bookshelf
+      box(w.manager.center.x, w.manager.center.z, 1.12, 0.45); // manager desk
+      for (const [x, z, , r] of w.plantSpots) this.circles.push({ x: ox + x, z: oz + z, r });
+      for (const c of [TABLE, COOLER]) this.circles.push({ x: ox + c.x, z: oz + c.z, r: c.r });
+      this.areas.push({ x0: ox - 6.8, x1: ox + 6.75, z0: oz - 4.78, z1: oz + 8.75 });
+      // walls the camera stays inside: the back wall and the left wall, with their doorways
+      this.walls.push({ axis: 'z', at: oz - 5.08, from: ox - 7.2, to: ox + 7, gaps: w.backRoom >= 0 ? [[ox + BACK_ARCH.x0, ox + BACK_ARCH.x1]] : [] });
+      this.walls.push({ axis: 'x', at: ox - 7.08, from: oz - 5.2, to: oz + 9, gaps: w.leftRoom >= 0 ? [[oz + 3, oz + 4]] : [] });
     }
-    box(-5.52, 1.6, 0.45, 1.15); // couch incl. arms
-    box(-4.45, 1.6, 0.2, 0.47); // low table
-    box(world.manager.center.x, world.manager.center.z, 1.12, 0.45); // manager desk
-    box(-6.62, -3.2, 0.37, 0.87); // coffee counter
-    box(-6.78, -0.6, 0.2, 0.62); // bookshelf
-    for (const [x, z, r] of [
-      [-6.5, -1.9, 0.26],
-      [6.4, -4.4, 0.32],
-      [-3.2, 4.3, 0.24],
-      [6.4, 3.6, 0.22],
-    ])
-      this.circles.push({ x, z, r });
+    this.rooms = this.areas.length;
+    // doorways: each overlaps both floors by more than a body width, so you can walk through
+    for (const w of worlds) {
+      const ox = w.origin.x;
+      const oz = w.origin.z;
+      if (w.leftRoom >= 0) this.areas.push({ x0: ox - 7.9, x1: ox - 6.2, z0: oz + 3.0, z1: oz + 4.0 });
+      if (w.backRoom >= 0) this.areas.push({ x0: ox + BACK_ARCH.x0 + 0.05, x1: ox + BACK_ARCH.x1 - 0.05, z0: oz - 5.8, z1: oz - 4.2 });
+    }
+    if (grounds) {
+      this.areas.push(...grounds.areas);
+      this.boxes.push(...grounds.boxes);
+      this.circles.push(...grounds.circles);
+    }
+  }
+
+  /** Which room's floor (index) is this point on, or -1 for a doorway or the garden. */
+  roomAt(p: THREE.Vector3): number {
+    for (let i = 0; i < this.rooms; i++) {
+      const a = this.areas[i];
+      if (p.x >= a.x0 && p.x <= a.x1 && p.z >= a.z0 && p.z <= a.z1) return i;
+    }
+    return -1;
+  }
+
+  /** Keep a circle of radius r inside the walkable floors. */
+  private clampToFloor(p: THREE.Vector3, r: number) {
+    let best: { x: number; z: number; d: number } | null = null;
+    for (const a of this.areas) {
+      const x = THREE.MathUtils.clamp(p.x, a.x0 + r, a.x1 - r);
+      const z = THREE.MathUtils.clamp(p.z, a.z0 + r, a.z1 - r);
+      const d = (x - p.x) ** 2 + (z - p.z) ** 2;
+      if (d < 1e-9) return; // already inside this floor
+      if (!best || d < best.d) best = { x, z, d };
+    }
+    if (best) {
+      p.x = best.x;
+      p.z = best.z;
+    }
   }
 
   /**
-   * Push a circle of radius r at p out of every obstacle (and keep it in the room).
+   * Push a circle of radius r at p out of every obstacle (and keep it on the floors).
    * `extra` are dynamic circles such as agents. Returns the index of an extra circle that was hit, or -1.
    */
   resolve(p: THREE.Vector3, r: number, extra: Circle[] = []): number {
@@ -54,7 +110,6 @@ export class Colliders {
         const d2 = dx * dx + dz * dz;
         if (d2 >= r * r) continue;
         if (d2 < 1e-8) {
-          // centre inside the box: push out along the shallowest side
           const opts = [p.x - b.x0, b.x1 - p.x, p.z - b.z0, b.z1 - p.z];
           const m = Math.min(...opts);
           if (m === opts[0]) p.x = b.x0 - r;
@@ -81,16 +136,13 @@ export class Colliders {
         p.z = c.z + (dz / d) * min;
         if (i >= this.circles.length) hitExtra = i - this.circles.length;
       });
-      // room bounds; the door gap lets you peek out but not leave
-      p.x = THREE.MathUtils.clamp(p.x, ROOM.x0 + r, ROOM.x1 - r);
-      p.z = THREE.MathUtils.clamp(p.z, ROOM.z0 + r, ROOM.z1 - r);
+      this.clampToFloor(p, r);
     }
     return hitExtra;
   }
 
-  /** Is the straight segment a→b free of furniture? Used to shorten the third-person camera arm. */
+  /** How far the third-person camera arm can reach from `from` toward `to` before a wall or furniture. */
   clearDistance(from: THREE.Vector3, to: THREE.Vector3, height: number): number {
-    // walls are tall; furniture is short (below ~1.3 m), so only walls block a camera above that
     const dir = to.clone().sub(from);
     const len = dir.length();
     let t = 1;
@@ -103,11 +155,16 @@ export class Colliders {
         }
       }
     }
-    // back and left walls
-    const bx = -6.9;
-    const bz = -4.9;
-    if (to.x < bx && dir.x < 0) t = Math.min(t, (bx - from.x) / dir.x);
-    if (to.z < bz && dir.z < 0) t = Math.min(t, (bz - from.z) / dir.z);
+    // walls (but not their doorways)
+    for (const w of this.walls) {
+      const a = w.axis === 'x' ? from.x : from.z;
+      const b = w.axis === 'x' ? to.x : to.z;
+      if ((a - w.at) * (b - w.at) >= 0) continue;
+      const s = (w.at - a) / (b - a);
+      const along = w.axis === 'x' ? from.z + dir.z * s : from.x + dir.x * s;
+      if (along < w.from || along > w.to || w.gaps.some(([g0, g1]) => along > g0 && along < g1)) continue;
+      t = Math.min(t, s - 0.1 / len);
+    }
     return Math.max(0.12, t) * len;
   }
 }

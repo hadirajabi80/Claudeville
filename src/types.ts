@@ -9,6 +9,7 @@ export interface OfficeEvent {
   model?: string;
   subModel?: string;
   runId?: string;
+  source?: string;
   ok?: boolean;
   ask?: AskPayload & { how?: string };
   tool?: string;
@@ -58,6 +59,8 @@ export interface SpawnOptions {
   subtitle: string;
   session: string;
   instant: boolean;
+  /** room of the building (0 Claude, 1 ChatGPT/Codex, 2 Cursor, 3 Z Code, 4 Work) */
+  room?: number;
   /** team members keep the name and look you gave them */
   fixedName?: string;
   gender?: 'm' | 'f';
@@ -100,6 +103,17 @@ function cap(s: string) {
 export function toolKind(tool?: string): ActivityKind {
   if (!tool) return 'think';
   if (tool.startsWith('mcp__')) return 'mcp';
+  // other agents' tool names (Cursor, Codex, Z Code) by keyword
+  const t = tool.toLowerCase();
+  if (!/^[A-Z]/.test(tool)) {
+    if (/terminal|shell|bash|exec|command/.test(t)) return 'run';
+    if (/edit|write|patch|create|delete|replace/.test(t)) return 'write';
+    if (/read|view|open/.test(t)) return 'read';
+    if (/web|fetch|browse/.test(t)) return 'web';
+    if (/search|grep|glob|find|list/.test(t)) return 'search';
+    if (/plan|todo/.test(t)) return 'todo';
+    if (/agent|task/.test(t)) return 'delegate';
+  }
   switch (tool) {
     case 'Read':
       return 'read';

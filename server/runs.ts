@@ -5,12 +5,15 @@ import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { buildRunner, detectAgents, type AgentKind } from './agents';
 
 export interface Run {
   runId: string;
   project: string;
   model: string;
   permission: 'edit' | 'auto' | 'readonly';
+  /** which coding agent does the work (Claude by default) */
+  agent?: AgentKind;
   /** team runs bring their own instructions (no generic report footer) */
   raw?: boolean;
   task: string;
@@ -26,6 +29,13 @@ export interface Run {
 }
 
 const runs = new Map<string, Run>();
+/** agent session id -> run id, for agents whose activity is read from their logs (Codex) */
+const sessionRuns = new Map<string, string>();
+
+/** Which office run (if any) an agent session belongs to. */
+export function runForSession(session: string): string | undefined {
+  return sessionRuns.get(session);
+}
 const MAX_RUNS = 6;
 
 const MODEL_IDS: Record<string, string | undefined> = {
@@ -84,6 +94,7 @@ function runEnv(runId: string): NodeJS.ProcessEnv {
 }
 
 function startRun(r: Run, broadcast: (raw: Record<string, unknown>) => void) {
+  if (r.agent && r.agent !== 'claude') return startOther(r, broadcast);
   const args = ['-p', '--output-format', 'json'];
   // read-only runs (team planning and review) can look at the code but never change it
   if (r.permission === 'readonly') args.push('--tools', 'Read', 'Grep', 'Glob');
@@ -130,6 +141,62 @@ function startRun(r: Run, broadcast: (raw: Record<string, unknown>) => void) {
   );
 }
 
+/** Codex, Cursor or Z Code doing the task. */
+function startOther(r: Run, broadcast: (raw: Record<string, unknown>) => void) {
+  const finish = (ok: boolean, text: string) => {
+    if (r.status !== 'running') return;
+    r.status = ok ? 'done' : 'failed';
+    r.endedAt = Date.now();
+    r.result = text;
+    r.child = undefined;
+    broadcast({ hook_event_name: 'RunDone', session_id: r.session ?? 'run:' + r.runId, office_run: r.runId, ok, summary: text, cwd: r.project });
+    r.onDone?.(ok, text);
+  };
+  const rn = buildRunner(r.agent!, { runId: r.runId, project: r.project, model: r.model, permission: r.permission, prompt: r.raw ? r.task : `${r.task}\n\nWhen you are done, end with a short report (2-4 sentences) for your manager: what you changed and anything they should check.` });
+  if ('error' in rn) {
+    setTimeout(() => finish(false, rn.error), 1500); // let the character reach a desk first
+    return;
+  }
+  const child = spawn(rn.cmd, rn.args, { cwd: r.project, env: runEnv(r.runId), shell: rn.shell, windowsHide: true });
+  r.child = child;
+  let out = '';
+  let err = '';
+  let partial = '';
+  child.stdout?.on('data', (c) => {
+    const text = String(c);
+    out += text;
+    if (out.length > 400_000) out = out.slice(-200_000);
+    if (!rn.sessionFromLine) return;
+    const lines = (partial + text).split('\n');
+    partial = lines.pop() ?? '';
+    for (const l of lines) {
+      const sid = rn.sessionFromLine(l);
+      if (sid && !r.session) {
+        r.session = sid;
+        sessionRuns.set(sid, r.runId);
+      }
+    }
+  });
+  child.stderr?.on('data', (c) => {
+    err += String(c);
+    if (err.length > 100_000) err = err.slice(-50_000);
+  });
+  child.on('error', (e) => finish(false, `Could not start ${r.agent}: ${e.message}`));
+  child.on('close', (code) => {
+    if (r.status === 'stopped') return;
+    let outText = '';
+    try {
+      if (rn.outFile && fs.existsSync(rn.outFile)) outText = fs.readFileSync(rn.outFile, 'utf8');
+    } catch {
+      /* ignore */
+    }
+    const res = rn.parse(code, out, err, outText);
+    finish(res.ok, res.text);
+  });
+  if (rn.stdin !== undefined) child.stdin?.end(rn.stdin);
+  else child.stdin?.end();
+}
+
 export async function handleRuns(
   req: IncomingMessage,
   res: ServerResponse,
@@ -149,6 +216,7 @@ export async function handleRuns(
 
   if (url.startsWith('/api/projects')) return send(200, { ok: true, projects: projectCandidates(knownCwds()) });
   if (url.startsWith('/api/models')) return send(200, { ok: true, default: defaultModel() });
+  if (url.startsWith('/api/agents')) return send(200, { ok: true, agents: detectAgents() });
   if (url.startsWith('/api/runs') && req.method === 'GET') return send(200, { ok: true, runs: [...runs.values()].map(publicRun).reverse() });
 
   let q: any = {};
@@ -176,10 +244,12 @@ export async function handleRuns(
     if (!task) return send(400, { ok: false, error: 'Write a task first.' });
     if (!fs.existsSync(project) || !fs.statSync(project).isDirectory()) return send(400, { ok: false, error: `Folder not found: ${project}` });
     if ([...runs.values()].filter((r) => r.status === 'running').length >= MAX_RUNS) return send(429, { ok: false, error: `At most ${MAX_RUNS} tasks at a time.` });
+    const agent = (['codex', 'cursor', 'zcode'].includes(q.agent) ? q.agent : 'claude') as AgentKind;
     const r: Run = {
       runId,
       project,
-      model: String(q.model ?? 'default') in MODEL_IDS ? String(q.model ?? 'default') : 'default',
+      agent,
+      model: agent !== 'claude' ? String(q.model ?? 'default').slice(0, 60) : String(q.model ?? 'default') in MODEL_IDS ? String(q.model ?? 'default') : 'default',
       permission: q.permission === 'auto' ? 'auto' : q.permission === 'readonly' ? 'readonly' : 'edit',
       raw: !!q.raw,
       task: task.slice(0, 24000),
@@ -195,14 +265,15 @@ export async function handleRuns(
 
 /** Start a run from server code (team mode) and get a promise for its result. */
 export function launchRun(
-  o: { runId: string; project: string; model: string; permission: Run['permission']; task: string; raw?: boolean },
+  o: { runId: string; project: string; model: string; permission: Run['permission']; task: string; raw?: boolean; agent?: AgentKind },
   broadcast: (raw: Record<string, unknown>) => void,
 ): Promise<{ ok: boolean; text: string }> {
   return new Promise((resolve) => {
     const r: Run = {
       runId: o.runId,
       project: o.project,
-      model: o.model in MODEL_IDS ? o.model : 'default',
+      model: !o.agent || o.agent === 'claude' ? (o.model in MODEL_IDS ? o.model : 'default') : o.model,
+      agent: o.agent,
       permission: o.permission,
       raw: o.raw,
       task: o.task,

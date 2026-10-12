@@ -29,7 +29,53 @@ export interface Desk extends Spot {
 }
 
 const AISLE_Z = -0.75;
+
+/** What makes each room different: name, accent colour, wall emblem. */
+export interface RoomTheme {
+  key: 'claude' | 'codex' | 'cursor' | 'zcode' | 'work';
+  name: string;
+  short: string;
+  accent: number;
+  emblem: 'sparkle' | 'knot' | 'cube' | 'zed' | 'gears';
+}
+
+export const ROOMS: RoomTheme[] = [
+  { key: 'claude', name: 'Claude', short: 'Claude', accent: 0xd97757, emblem: 'sparkle' },
+  { key: 'codex', name: 'ChatGPT · Codex', short: 'ChatGPT', accent: 0x10a37f, emblem: 'knot' },
+  { key: 'cursor', name: 'Cursor', short: 'Cursor', accent: 0x5b6472, emblem: 'cube' },
+  { key: 'zcode', name: 'Z Code', short: 'Z Code', accent: 0x3b6cf6, emblem: 'zed' },
+  { key: 'work', name: 'Work Room', short: 'Work', accent: 0x8a5cf6, emblem: 'gears' },
+];
+
+/**
+ * Rooms are square cells on a grid ([column, row]); neighbours share a wall with a doorway in it.
+ * Each room is built around its origin: x -7..7, z -5..9 (back wall at -5, open front at +9).
+ */
+export const ROOM_SIZE = 14;
+export const GRID: [number, number][] = [
+  [0, 0],
+  [1, 0],
+  [2, 0],
+  [0, 1],
+  [1, 1],
+];
+/** The empty cell of the grid holds a little garden. */
+export const GARDEN_CELL: [number, number] = [2, 1];
+export const cellOrigin = (col: number, row: number) => new THREE.Vector3(col * ROOM_SIZE, 0, row * ROOM_SIZE);
+const roomAtCell = (col: number, row: number) => GRID.findIndex(([c, r]) => c === col && r === row);
+/** Doorway in the back wall (local x), used when another room sits behind this one. */
+export const BACK_ARCH = { x0: 5.55, x1: 6.75 };
+/** A world position in its room's local frame (rooms repeat every ROOM_SIZE). */
+export function localOf(p: THREE.Vector3) {
+  return {
+    x: p.x - Math.round(p.x / ROOM_SIZE) * ROOM_SIZE,
+    z: p.z - Math.round((p.z - 2) / ROOM_SIZE) * ROOM_SIZE,
+  };
+}
 const DESK_X = [-2.5, 0, 2.5, 5.0];
+/** The front corner of every room: a round standing table and a water cooler (local positions). */
+export const TABLE = { x: -2.5, z: 7.0, r: 0.55 };
+export const COOLER = { x: 4.4, z: 8.45, r: 0.3 };
 
 function std(color: number, opts: Partial<THREE.MeshStandardMaterialParameters> = {}) {
   return new THREE.MeshStandardMaterial({ color, roughness: 0.85, metalness: 0, ...opts });
@@ -139,8 +185,8 @@ export class World {
   private clock!: { tex: THREE.CanvasTexture; g: CanvasRenderingContext2D };
   private board!: { tex: THREE.CanvasTexture; g: CanvasRenderingContext2D };
   private windowTex!: { tex: THREE.CanvasTexture; g: CanvasRenderingContext2D };
-  private sun!: THREE.DirectionalLight;
-  private hemi!: THREE.HemisphereLight;
+  sun?: THREE.DirectionalLight;
+  private hemi?: THREE.HemisphereLight;
   private lastSecond = -1;
   /** The manager's desk at the front of the room, where you sit and dispatch tasks. */
   manager!: {
@@ -154,14 +200,46 @@ export class World {
   };
   private bellT = -1;
 
-  constructor(private scene: THREE.Scene) {
-    this.lights();
+  readonly root = new THREE.Group();
+  readonly origin: THREE.Vector3;
+  /** neighbouring rooms (index into ROOMS, or -1): left through the side door, back through the arch */
+  readonly leftRoom: number;
+  readonly backRoom: number;
+  /** sides on the outline of the building (no room beyond them) */
+  readonly openRight: boolean;
+  readonly openFront: boolean;
+  /** potted plants: local x, z, scale and collision radius */
+  readonly plantSpots: [number, number, number, number][];
+
+  constructor(
+    private scene: THREE.Scene,
+    readonly index = 0,
+    readonly theme: RoomTheme = ROOMS[0],
+  ) {
+    const [col, row] = GRID[index] ?? [index, 0];
+    this.origin = cellOrigin(col, row);
+    this.leftRoom = roomAtCell(col - 1, row);
+    this.backRoom = roomAtCell(col, row - 1);
+    this.openRight = roomAtCell(col + 1, row) < 0;
+    this.openFront = roomAtCell(col, row + 1) < 0;
+    this.plantSpots = [
+      [-6.5, -1.9, 1.1, 0.26],
+      // the back-right corner is the arch when a room sits behind
+      this.backRoom >= 0 ? [4.6, -4.45, 1.2, 0.3] : [6.4, -4.4, 1.3, 0.32],
+      [-3.2, 4.3, 1.0, 0.24],
+      [6.4, 6.4, 0.9, 0.22],
+      [-6.3, 8.3, 1.2, 0.28],
+    ];
+    scene.add(this.root);
+    // lights are shared by the whole building: only the first room creates them
+    if (index === 0) this.lights();
     this.room();
     this.buildDesks();
     this.buildLounge();
     this.decor();
     this.buildManager();
     this.graph();
+    this.placeAt(this.origin);
   }
 
   private lights() {
@@ -174,8 +252,8 @@ export class World {
     const s = sun.shadow.camera;
     s.left = -10;
     s.right = 10;
-    s.top = 9;
-    s.bottom = -9;
+    s.top = 10;
+    s.bottom = -10;
     s.near = 1;
     s.far = 30;
     sun.shadow.bias = -0.0005;
@@ -195,7 +273,7 @@ export class World {
   }
 
   private room() {
-    const s = this.scene;
+    const s = this.root;
     // floor planks
     const { tex: floorTex } = canvasTex(512, 512, (g) => {
       g.fillStyle = '#E3D5C0';
@@ -210,36 +288,44 @@ export class World {
       }
     });
     floorTex.wrapS = floorTex.wrapT = THREE.RepeatWrapping;
-    floorTex.repeat.set(3.5, 2.5);
-    const floor = new THREE.Mesh(new THREE.PlaneGeometry(14, 10), std(0xffffff, { map: floorTex }));
+    floorTex.repeat.set(3.5, 3.5);
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(14, 14), std(0xffffff, { map: floorTex }));
     floor.rotation.x = -Math.PI / 2;
+    floor.position.z = 2;
     floor.receiveShadow = true;
     s.add(floor);
-    // ground outside, so the open sides do not float in the void
-    const ground = new THREE.Mesh(new THREE.CircleGeometry(40, 48), std(0xeadfcd));
-    ground.rotation.x = -Math.PI / 2;
-    ground.position.y = -0.02;
-    ground.receiveShadow = true;
-    s.add(ground);
-    // floor edge trim
-    box(14.3, 0.08, 0.3, std(C.walnut), 0, 0.04, 5.0, s, false);
-    box(0.3, 0.08, 10, std(C.walnut), 7.0, 0.04, 0, s, false);
+    // floor edge trim along the outside of the building
+    if (this.openFront) box(14.3, 0.08, 0.3, std(C.walnut), 0, 0.04, 9.0, s, false);
+    if (this.openRight) box(0.3, 0.08, 14, std(C.walnut), 7.0, 0.04, 2, s, false);
 
     const wallM = std(C.cream);
-    const T = 0.16;
-    // back wall
-    box(14 + T, 3, T, wallM, 0, 1.5, -5 - T / 2, s, true, true);
-    // left wall with a door opening (z 3..4)
-    box(T, 3, 8, wallM, -7 - T / 2, 1.5, -1, s);
-    box(T, 3, 1, wallM, -7 - T / 2, 1.5, 4.5, s);
-    box(T, 0.9, 1, wallM, -7 - T / 2, 2.55, 3.5, s);
-    // accent band and baseboards
-    const accent = std(C.orange);
-    box(14, 0.5, 0.02, accent, 0, 1.45, -4.99, s, false);
-    box(0.02, 0.5, 8, accent, -6.99, 1.45, -1, s, false);
+    const accent = std(this.theme.accent);
     const base = std(C.walnut);
-    box(14, 0.12, 0.03, base, 0, 0.06, -4.98, s, false);
-    box(0.03, 0.12, 8, base, -6.98, 0.06, -1, s, false);
+    const T = 0.16;
+    // back wall, with an arch through to the room behind when there is one
+    const backRuns: [number, number][] = this.backRoom >= 0 ? [[-7 - T, BACK_ARCH.x0], [BACK_ARCH.x1, 7]] : [[-7 - T, 7]];
+    for (const [a, b] of backRuns) {
+      box(b - a, 3, T, wallM, (a + b) / 2, 1.5, -5 - T / 2, s);
+      const ia = Math.max(a, -7);
+      box(b - ia, 0.5, 0.02, accent, (ia + b) / 2, 1.45, -4.99, s, false);
+      box(b - ia, 0.12, 0.03, base, (ia + b) / 2, 0.06, -4.98, s, false);
+    }
+    if (this.backRoom >= 0) {
+      const w = BACK_ARCH.x1 - BACK_ARCH.x0;
+      const cx = (BACK_ARCH.x0 + BACK_ARCH.x1) / 2;
+      box(w, 0.8, T, wallM, cx, 2.6, -5 - T / 2, s);
+      box(w + 0.12, 0.08, T + 0.06, std(C.walnut), cx, 2.2, -5 - T / 2, s, false);
+    }
+    // left wall with a door opening (z 3..4)
+    for (const [a, b] of [
+      [-5, 3],
+      [4, 9],
+    ]) {
+      box(T, 3, b - a, wallM, -7 - T / 2, 1.5, (a + b) / 2, s);
+      box(0.02, 0.5, b - a, accent, -6.99, 1.45, (a + b) / 2, s, false);
+      box(0.03, 0.12, b - a, base, -6.98, 0.06, (a + b) / 2, s, false);
+    }
+    box(T, 0.9, 1, wallM, -7 - T / 2, 2.55, 3.5, s);
 
     // window (back wall), with a sky canvas that follows the local time
     this.windowTex = canvasTex(256, 128, () => {});
@@ -283,7 +369,7 @@ export class World {
         const g = new THREE.Group();
         g.position.set(x, 0, z);
         g.rotation.y = row === 0 ? 0 : Math.PI;
-        this.scene.add(g);
+        this.root.add(g);
         // desk (local frame: the worker sits at +z and faces -z)
         box(1.4, 0.04, 0.7, wood, 0, 0.75, 0, g);
         for (const [lx, lz] of [
@@ -373,7 +459,7 @@ export class World {
   }
 
   private buildLounge() {
-    const s = this.scene;
+    const s = this.root;
     const fabric = std(C.terracotta, { roughness: 0.95 });
     // rug
     const { tex: rugTex } = canvasTex(256, 256, (g) => {
@@ -450,24 +536,19 @@ export class World {
   }
 
   private decor() {
-    const s = this.scene;
+    const s = this.root;
     // Claude sparkle logo
     const logo = new THREE.Group();
     logo.position.set(-1.5, 2.3, -4.96);
-    const lm = std(C.orange, { emissive: C.orange, emissiveIntensity: 0.25, roughness: 0.5 });
-    const g1 = new THREE.ExtrudeGeometry(sparkleShape(0.5, 0.09), { depth: 0.04, bevelEnabled: false });
-    const g2 = new THREE.ExtrudeGeometry(sparkleShape(0.32, 0.07), { depth: 0.04, bevelEnabled: false });
-    const a = new THREE.Mesh(g1, lm);
-    const b = new THREE.Mesh(g2, lm);
-    b.rotation.z = Math.PI / 4;
-    logo.add(a, b);
+    const lm = std(this.theme.accent, { emissive: this.theme.accent, emissiveIntensity: 0.25, roughness: 0.5 });
+    this.emblem(logo, lm);
     s.add(logo);
     this.logo = logo;
     const { tex: signTex } = canvasTex(512, 96, (g) => {
       g.fillStyle = '#2B2B2E';
       g.font = 'bold 54px Georgia, serif';
       g.textAlign = 'center';
-      g.fillText(APP_NAME, 256, 66);
+      g.fillText(this.index === 0 ? APP_NAME : this.theme.name, 256, 66);
     });
     const sign = new THREE.Mesh(new THREE.PlaneGeometry(1.9, 0.36), new THREE.MeshStandardMaterial({ map: signTex, transparent: true, roughness: 0.8 }));
     sign.position.set(-1.5, 1.62, -4.97);
@@ -516,12 +597,7 @@ export class World {
     }
 
     // potted plants
-    for (const [x, z, sc] of [
-      [-6.5, -1.9, 1.1],
-      [6.4, -4.4, 1.3],
-      [-3.2, 4.3, 1.0],
-      [6.4, 3.6, 0.9],
-    ]) {
+    for (const [x, z, sc] of this.plantSpots) {
       const p = new THREE.Group();
       p.position.set(x, 0, z);
       p.scale.setScalar(sc);
@@ -540,10 +616,56 @@ export class World {
       this.plants.push(leaves);
     }
 
+    // front corner: a round standing table on a rug and a water cooler
+    const { tex: roundTex } = canvasTex(256, 256, (g) => {
+      const accentCss = '#' + this.theme.accent.toString(16).padStart(6, '0');
+      g.fillStyle = accentCss;
+      g.beginPath();
+      g.arc(128, 128, 126, 0, Math.PI * 2);
+      g.fill();
+      g.fillStyle = '#F3EDE3';
+      g.beginPath();
+      g.arc(128, 128, 110, 0, Math.PI * 2);
+      g.fill();
+      g.strokeStyle = accentCss;
+      g.globalAlpha = 0.35;
+      g.lineWidth = 4;
+      for (let r = 30; r < 100; r += 18) {
+        g.beginPath();
+        g.arc(128, 128, r, 0, Math.PI * 2);
+        g.stroke();
+      }
+    });
+    const roundRug = new THREE.Mesh(new THREE.CircleGeometry(1.7, 40), new THREE.MeshStandardMaterial({ map: roundTex, transparent: true, roughness: 1 }));
+    roundRug.rotation.x = -Math.PI / 2;
+    roundRug.position.set(TABLE.x, 0.012, TABLE.z);
+    roundRug.receiveShadow = true;
+    s.add(roundRug);
+    const wood = std(C.walnut, { roughness: 0.55 });
+    cyl(0.5, 0.5, 0.05, wood, TABLE.x, 1.05, TABLE.z, s, 28);
+    cyl(0.04, 0.04, 1.0, std(C.charcoal), TABLE.x, 0.53, TABLE.z, s, 8);
+    cyl(0.3, 0.32, 0.04, std(C.charcoal), TABLE.x, 0.02, TABLE.z, s, 20);
+    cyl(0.04, 0.036, 0.09, std(C.sky), TABLE.x + 0.18, 1.12, TABLE.z - 0.1, s, 10);
+    cyl(0.04, 0.036, 0.09, std(C.amber), TABLE.x - 0.2, 1.12, TABLE.z + 0.12, s, 10);
+    // water cooler
+    box(0.4, 0.95, 0.4, std(C.warmWhite), COOLER.x, 0.475, COOLER.z, s);
+    box(0.06, 0.05, 0.05, std(C.sky), COOLER.x - 0.08, 0.82, COOLER.z - 0.22, s, false);
+    box(0.06, 0.05, 0.05, std(C.terracotta), COOLER.x + 0.08, 0.82, COOLER.z - 0.22, s, false);
+    const bottle = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.42, 16), new THREE.MeshStandardMaterial({ color: 0x8cc4e8, transparent: true, opacity: 0.75, roughness: 0.15 }));
+    bottle.position.set(COOLER.x, 1.16, COOLER.z);
+    s.add(bottle);
+    for (const [x, z, yaw] of [
+      [TABLE.x + 0.95, TABLE.z, -Math.PI / 2],
+      [TABLE.x - 0.95, TABLE.z, Math.PI / 2],
+      [TABLE.x, TABLE.z - 0.95, 0],
+    ]) {
+      this.lounge.push({ kind: 'stand', pos: new THREE.Vector3(x, 0, z), yaw, node: 'TABLE', approach: x < TABLE.x - 0.5 ? [new THREE.Vector3(x, 0, TABLE.z - 1.15)] : [] });
+    }
+    this.lounge.push({ kind: 'stand', pos: new THREE.Vector3(COOLER.x, 0, COOLER.z - 0.7), yaw: 0, node: 'TABLE', approach: [] });
   }
 
   private buildManager() {
-    const s = this.scene;
+    const s = this.root;
     const g = new THREE.Group();
     g.position.set(2.0, 0, 3.75);
     s.add(g);
@@ -621,7 +743,7 @@ export class World {
     this.manager.seat = g.localToWorld(new THREE.Vector3(0, 0, 0.6));
     // where called agents stand, facing the manager
     for (const x of [1.3, 2.0, 2.7]) {
-      this.manager.visitors.push({ kind: 'stand', pos: new THREE.Vector3(x, 0, 2.95), yaw: 0, node: 'FRONT_M', approach: [] });
+      this.manager.visitors.push({ kind: 'visit', pos: new THREE.Vector3(x, 0, 2.95), yaw: 0, node: 'FRONT_M', approach: [] });
     }
     this.drawManagerScreen([]);
   }
@@ -663,7 +785,9 @@ export class World {
     n.add('SIDE_N', -3.9, -3.5);
     n.add('COFFEE', -5.3, -3.5);
     n.add('FRONT_M', 2.0, 2.9);
+    n.add('TABLE', -1.0, 5.85);
     DESK_X.forEach((x, i) => n.add(`A${i}`, x, AISLE_Z));
+    n.link('SIDE_S', 'TABLE');
     n.link('DOOR_OUT', 'DOOR_IN');
     n.link('DOOR_IN', 'LOUNGE');
     n.link('DOOR_IN', 'SIDE_S');
@@ -674,6 +798,81 @@ export class World {
     n.link('SIDE_S', 'FRONT_M');
     n.link('SIDE_M', 'A0');
     for (let i = 0; i < DESK_X.length - 1; i++) n.link(`A${i}`, `A${i + 1}`);
+  }
+
+  /** An abstract emblem for the room's wall (no product logos). */
+  private emblem(group: THREE.Group, m: THREE.Material) {
+    const e = this.theme.emblem;
+    if (e === 'sparkle') {
+      const a = new THREE.Mesh(new THREE.ExtrudeGeometry(sparkleShape(0.5, 0.09), { depth: 0.04, bevelEnabled: false }), m);
+      const b = new THREE.Mesh(new THREE.ExtrudeGeometry(sparkleShape(0.32, 0.07), { depth: 0.04, bevelEnabled: false }), m);
+      b.rotation.z = Math.PI / 4;
+      group.add(a, b);
+    } else if (e === 'knot') {
+      group.add(new THREE.Mesh(new THREE.TorusKnotGeometry(0.28, 0.07, 96, 12, 2, 3), m));
+    } else if (e === 'cube') {
+      const c = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.5), m);
+      c.rotation.set(0.6, 0.78, 0);
+      group.add(c);
+    } else if (e === 'zed') {
+      const zs = new THREE.Shape();
+      zs.moveTo(-0.4, 0.4);
+      zs.lineTo(0.4, 0.4);
+      zs.lineTo(0.4, 0.26);
+      zs.lineTo(-0.16, -0.26);
+      zs.lineTo(0.4, -0.26);
+      zs.lineTo(0.4, -0.4);
+      zs.lineTo(-0.4, -0.4);
+      zs.lineTo(-0.4, -0.26);
+      zs.lineTo(0.16, 0.26);
+      zs.lineTo(-0.4, 0.26);
+      zs.closePath();
+      group.add(new THREE.Mesh(new THREE.ExtrudeGeometry(zs, { depth: 0.06, bevelEnabled: false }), m));
+    } else {
+      for (const [x, y, r] of [
+        [-0.18, 0.08, 0.26],
+        [0.26, -0.16, 0.18],
+      ]) {
+        const gear = new THREE.Mesh(new THREE.TorusGeometry(r, r * 0.28, 8, 10), m);
+        gear.position.set(x, y, 0);
+        group.add(gear);
+      }
+    }
+  }
+
+  /** Move this room (built around the origin) to its place in the building. */
+  private placeAt(o: THREE.Vector3) {
+    if (o.lengthSq() === 0) return;
+    this.root.position.copy(o);
+    const move = (v: THREE.Vector3) => v.add(o);
+    for (const d of this.desks) {
+      move(d.pos);
+      move(d.side);
+      move(d.center);
+      move(d.steamAt);
+      d.approach.forEach(move);
+    }
+    for (const sp of [...this.lounge, ...this.boards, ...this.manager.visitors]) {
+      move(sp.pos);
+      sp.approach.forEach(move);
+    }
+    move(this.manager.center);
+    move(this.manager.seat);
+    move(this.doorIn);
+    move(this.doorOut);
+    move(this.coffeeSteam);
+    for (const v of this.nav.nodes.values()) move(v);
+  }
+
+  /** Is a world x/z position inside this room's floor? */
+  contains(p: THREE.Vector3) {
+    const o = this.origin;
+    return p.x >= o.x - 7.2 && p.x <= o.x + 7.2 && p.z >= o.z - 5 && p.z <= o.z + 9;
+  }
+
+  /** The middle of the side door in the left wall. */
+  get doorPos() {
+    return this.origin.clone().add(new THREE.Vector3(-7, 1.2, 3.5));
   }
 
   /** Things that move or get swapped at runtime: never merged into static geometry. */
@@ -693,7 +892,8 @@ export class World {
     return pts;
   }
 
-  update(dt: number, t: number, nearDoor: boolean) {
+  /** `live` is false for rooms nobody is looking at: their screens and clocks pause. */
+  update(dt: number, t: number, nearDoor: boolean, live = true) {
     // door
     const target = nearDoor ? -1.45 : 0;
     this.doorAngle += (target - this.doorAngle) * (1 - Math.exp(-dt / 0.12));
@@ -716,6 +916,7 @@ export class World {
       p.rotation.z = 0.025 * Math.sin(t * 0.8 + i);
       p.rotation.x = 0.02 * Math.sin(t * 0.6 + i * 2);
     });
+    if (!live) return;
     for (const d of this.desks) {
       d.screen.update(dt);
       const m = d.glow.material as THREE.MeshBasicMaterial;
@@ -806,8 +1007,8 @@ export class World {
       }
     }
     this.windowTex.tex.needsUpdate = true;
-    this.sun.intensity = 0.9 + 1.3 * day;
-    this.hemi.intensity = 0.55 + 0.3 * day;
+    if (this.sun) this.sun.intensity = 0.9 + 1.3 * day;
+    if (this.hemi) this.hemi.intensity = 0.55 + 0.3 * day;
   }
 
   drawBoard(items: { name: string; text: string; color: string; done?: boolean }[]) {

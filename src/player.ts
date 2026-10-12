@@ -7,6 +7,7 @@ import { trimShadowCasters } from './perf';
 import { C } from './palette';
 import * as P from './pose';
 import type { Colliders, Circle } from './colliders';
+import { localOf } from './world';
 import type { Office } from './office';
 import type { Sound } from './sound';
 import type { Effects } from './effects';
@@ -353,7 +354,8 @@ export class Player {
       const prev = this.phase;
       this.phase += dt * Math.PI * 2 * hz * Math.min(1, this.speed / FEEL.walk);
       if (Math.floor(prev / Math.PI) !== Math.floor(this.phase / Math.PI)) {
-        const onRug = p.x > -6.4 && p.x < -3.8 && p.z > 0.1 && p.z < 3.1;
+        const l = localOf(p);
+        const onRug = l.x > -6.4 && l.x < -3.8 && l.z > 0.1 && l.z < 3.1;
         this.sound.step(p.clone(), onRug, runK > 0.3 ? 1.4 : 1, true);
       }
     }

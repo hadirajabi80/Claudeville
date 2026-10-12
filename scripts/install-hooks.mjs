@@ -63,3 +63,26 @@ console.log(
     ? `Removed Claudeville hooks from ${settingsPath}`
     : `Installed Claudeville hooks in ${settingsPath}\nActivity relay: ${relay}\nQuestions & permissions: ${askHook}`,
 );
+
+// ---------------------------------------------------------------- Cursor (~/.cursor/hooks.json)
+// Only events that report what already happened (plus the prompt, which is always let through),
+// so the hooks never approve or block anything in Cursor. Cursor reloads this file by itself.
+const cursorDir = path.join(os.homedir(), '.cursor');
+if (fs.existsSync(cursorDir)) {
+  const cursorPath = path.join(cursorDir, 'hooks.json');
+  const CURSOR_EVENTS = ['beforeSubmitPrompt', 'afterShellExecution', 'afterFileEdit', 'afterMCPExecution', 'stop'];
+  const rawC = fs.existsSync(cursorPath) ? fs.readFileSync(cursorPath, 'utf8') : '';
+  if (rawC) fs.writeFileSync(`${cursorPath}.claudeville-backup-${Date.now()}`, rawC);
+  const cur = rawC ? JSON.parse(rawC) : { version: 1, hooks: {} };
+  cur.version ??= 1;
+  cur.hooks ??= {};
+  for (const ev of CURSOR_EVENTS) {
+    const list = (cur.hooks[ev] ?? []).filter((h) => !String(h.command ?? '').split('\\').join('/').includes(MARKER));
+    if (!uninstall) list.push({ command: `node "${relay}" --source=cursor` });
+    if (list.length) cur.hooks[ev] = list;
+    else delete cur.hooks[ev];
+  }
+  fs.writeFileSync(cursorPath, JSON.stringify(cur, null, 2) + '\n');
+  console.log(uninstall ? `Removed Claudeville hooks from ${cursorPath}` : `Installed Cursor hooks in ${cursorPath}`);
+}
+// Codex and Z Code need no hooks: Claudeville reads the session logs they already write.

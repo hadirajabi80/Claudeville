@@ -1691,3 +1691,90 @@ body.dispatching .helpbox {
   background: var(--orange) !important;
   color: #fff !important;
 }
+
+/* ------------------------------------------------------------ rooms */
+#rooms {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  translate: -50% 0;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: rgba(250, 247, 242, 0.92);
+  backdrop-filter: blur(10px);
+  border-radius: 12px;
+  box-shadow: 0 4px 14px rgba(60, 40, 20, 0.12);
+  z-index: 20;
+}
+#rooms button {
+  border: 0;
+  background: transparent;
+  border-radius: 9px;
+  padding: 6px 10px;
+  font: 600 12.5px ui-sans-serif, 'Segoe UI', sans-serif;
+  color: var(--charcoal);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+#rooms button i {
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+}
+#rooms button.all {
+  border-right: 1px solid rgba(43, 43, 46, 0.12);
+  border-radius: 9px 4px 4px 9px;
+}
+#rooms button.on {
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+#rooms button .n:not(:empty) {
+  background: var(--orange);
+  color: #fff;
+  border-radius: 999px;
+  font-size: 10px;
+  padding: 0 5px;
+}
+@media (max-width: 1100px) {
+  #rooms {
+    top: 64px;
+  }
+}
+
+#team .agentnote {
+  font-size: 11px;
+  color: #39a853;
+}
+#team .agentnote.bad {
+  color: #c0392b;
+}
+#team .member .agent {
+  font-size: 10.5px;
+  background: #f3ede3;
+  border-radius: 999px;
+  padding: 0 6px;
+}
+#team .member .warn {
+  font-size: 10.5px;
+  color: #c0392b;
+}
+#dispatch .other input {
+  width: 100%;
+  box-sizing: border-box;
+}
+#dispatch .agentnote {
+  font-size: 11px;
+  color: #39a853;
+  margin-top: 4px;
+}
+#dispatch .agentnote.bad {
+  color: #c0392b;
+}
+#dispatch .task .agent {
+  font-size: 11px;
+  margin-right: 2px;
+}

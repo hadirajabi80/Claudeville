@@ -4,6 +4,7 @@ import { toolKind, type OfficeEvent, type Stage } from './types';
 interface LeadInfo {
   id: string;
   session: string;
+  room: number;
   working: boolean;
   last: number;
   run?: string; // dispatched from the manager desk
@@ -33,6 +34,9 @@ const SUB_NAMES: Record<string, string> = {
 };
 
 let subCounter = 0;
+
+/** Which room each agent product lives in. */
+const SOURCE_ROOM: Record<string, number> = { claude: 0, codex: 1, cursor: 2, zcode: 3 };
 
 export class Director {
   private leads = new Map<string, LeadInfo>(); // by session
@@ -141,10 +145,12 @@ export class Director {
 
   private leadModel = new Map<string, string>();
   private runChars = new Map<string, string>(); // runId -> character id
+  private runRooms = new Map<string, number>(); // runId -> room the character works in
 
   /** The manager called a character for a task; its run's events will drive that character. */
-  expectRun(runId: string, charId: string) {
+  expectRun(runId: string, charId: string, room = 4) {
     this.runChars.set(runId, charId);
+    this.runRooms.set(runId, room);
   }
 
   /** Keep each character's model label current; subagents inherit the lead's model until known. */
@@ -203,11 +209,11 @@ export class Director {
     let lead = this.leads.get(e.session);
     if (!lead && e.runId && this.runChars.has(e.runId)) {
       // first event of a dispatched task: bind its session to the character that was called
-      lead = { id: this.runChars.get(e.runId)!, session: e.session, working: false, last: now, run: e.runId };
+      lead = { id: this.runChars.get(e.runId)!, session: e.session, working: false, last: now, run: e.runId, room: this.runRooms.get(e.runId) ?? 4 };
       this.leads.set(e.session, lead);
     }
     if (!lead) {
-      lead = { id: `lead:${e.session}`, session: e.session, working: false, last: now };
+      lead = { id: `lead:${e.session}`, session: e.session, working: false, last: now, room: SOURCE_ROOM[e.source ?? 'claude'] ?? 0 };
       this.leads.set(e.session, lead);
       if (!this.stage.has(lead.id)) {
         this.stage.spawn(lead.id, {
@@ -216,6 +222,7 @@ export class Director {
           subtitle: e.project || e.session.slice(0, 8),
           session: e.session,
           instant: this.instant,
+          room: lead.room,
         });
       }
       const m = e.model ?? this.leadModel.get(e.session);
@@ -246,6 +253,7 @@ export class Director {
     this.subs.set(id, { id, session: e.session, toolUseId: e.toolUseId, bound: false, last: now, model: e.subModel ?? this.leadModel.get(e.session) });
     this.stage.spawn(id, {
       role: 'sub',
+      room: this.leads.get(e.session)?.room ?? 0,
       name: 'Agent',
       subtitle: e.detail || 'subagent',
       session: e.session,
@@ -268,6 +276,7 @@ export class Director {
       this.subs.set(id, sub);
       this.stage.spawn(id, {
         role: 'sub',
+        room: this.leads.get(e.session)?.room ?? 0,
         name: 'Agent',
         subtitle: e.agentType || 'subagent',
         session: e.session,
